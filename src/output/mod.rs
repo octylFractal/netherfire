@@ -40,11 +40,14 @@ pub fn create_curseforge_zip(
     pack: &PackConfig,
     mods: &ModConfig,
     source_dir: &Path,
-    output_file: PathBuf,
+    output_dir: PathBuf,
 ) -> Result<(), CreateCurseForgeZipError> {
     if !mods.mods.modrinth.is_empty() {
         todo!("Download Modrinth mods and add them to the zip")
     }
+
+    std::fs::create_dir_all(&output_dir)?;
+    let output_file = output_dir.join(format!("{} ({}).zip", pack.name, pack.version));
 
     let mut zip = ZipWriter::new(std::fs::File::create(output_file)?);
 

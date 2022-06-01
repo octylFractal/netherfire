@@ -30,6 +30,7 @@ pub struct Netherfire {
     /// Modpack source folder.
     pub source: PathBuf,
     /// Write a CurseForge-format client modpack ZIP to the given path.
+    /// The path should be a directory, the ZIP will be written under it.
     #[clap(long)]
     pub create_curseforge_zip: Option<PathBuf>,
     /// Produce a server base folder by downloading mods if needed.
