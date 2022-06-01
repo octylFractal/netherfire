@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 
 use ferinth::structures::project_structs::Project as FerinthProject;
 use ferinth::structures::project_structs::ProjectType;
