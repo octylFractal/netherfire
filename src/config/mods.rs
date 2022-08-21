@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use ferinth::structures::project_structs::Project as FerinthProject;
 use ferinth::structures::project_structs::ProjectType;
-use furse::structures::file_structs::HashAlgo;
+use furse::structures::file_structs::{FileDependency, FileRelationType, HashAlgo};
 use furse::structures::mod_structs::Mod as FurseMod;
 use futures::TryStreamExt;
 use itertools::Itertools;
@@ -76,8 +76,8 @@ pub enum ModVerificationError {
     DistributionDenied,
     #[error("The project exists, but is not a mod")]
     NotAMod,
-    #[error("No file was specified, pick from {0:?}")]
-    NoFileSpecified(Vec<String>),
+    #[error("Required dependencies are not specified in the mods list: {0:?}")]
+    MissingRequiredDependencies(Vec<i32>),
     #[error("CurseForge Error: {0}")]
     Furse(#[from] furse::Error),
     #[error("Modrinth Error: {0}")]
@@ -101,20 +101,22 @@ impl ModConfig {
         &self,
         pack_config: &PackConfig,
     ) -> Result<(), ModsVerificationError> {
+        if !self.mods.modrinth.is_empty() {
+            todo!("Modrinth can't be processed fully yet")
+        }
         let mut failures = HashMap::<String, ModVerificationError>::new();
+        let mods_by_id = self
+            .mods
+            .curseforge
+            .values()
+            .map(|v| v.source.file_id)
+            .collect::<HashSet<_>>();
         let verifications = self
             .mods
             .curseforge
             .iter()
             .sorted_by_key(|(k, _)| k.to_string())
             .map(|(k, m)| (k.to_string(), submit_verify(m.source.clone(), pack_config)))
-            .chain(
-                self.mods
-                    .modrinth
-                    .iter()
-                    .sorted_by_key(|(k, _)| k.to_string())
-                    .map(|(k, m)| (k.to_string(), submit_verify(m.source.clone(), pack_config))),
-            )
             .collect::<Vec<_>>();
         for (cfg_id, verification_ftr) in verifications {
             match verification_ftr.await.expect("tokio failure") {
@@ -122,7 +124,39 @@ impl ModConfig {
                     failures.insert(cfg_id.clone(), e);
                 }
                 Ok(loaded_mod) => {
-                    log::info!("Mod {} (in config: {}) verified.", loaded_mod.name, cfg_id);
+                    // Verify that all dependencies are specified.
+                    let mut missing_deps = Vec::new();
+                    for dep in loaded_mod.dependencies {
+                        match dep.relation_type {
+                            FileRelationType::RequiredDependency => {
+                                if !mods_by_id.contains(&dep.mod_id) {
+                                    missing_deps.push(dep.mod_id);
+                                }
+                            }
+                            FileRelationType::OptionalDependency => {
+                                if !mods_by_id.contains(&dep.mod_id) {
+                                    log::info!(
+                                        "[FYI] Missing optional dependency for {}: {}",
+                                        cfg_id,
+                                        dep.mod_id
+                                    );
+                                }
+                            }
+                            _ => {}
+                        };
+                    }
+                    if !missing_deps.is_empty() {
+                        failures.insert(
+                            cfg_id.clone(),
+                            ModVerificationError::MissingRequiredDependencies(missing_deps),
+                        );
+                        continue;
+                    }
+                    log::info!(
+                        "Mod {} (in config: {}) verified.",
+                        loaded_mod.mod_.name,
+                        cfg_id
+                    );
                 }
             }
         }
@@ -236,7 +270,7 @@ impl Default for ModSide {
     }
 }
 
-type ModVerificationResult = Result<LoadedMod, ModVerificationError>;
+type ModVerificationResult = Result<ModVerificationInfo, ModVerificationError>;
 type ModDownloadResult = Result<PathBuf, ModDownloadError>;
 
 #[async_trait::async_trait]
@@ -247,47 +281,27 @@ trait ModSource {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CurseForgeModSource {
-    pub project_id: u32,
-    #[serde(default)]
-    pub file_id: Option<u32>,
+    pub project_id: i32,
+    pub file_id: i32,
 }
 
 #[async_trait::async_trait]
 impl ModSource for CurseForgeModSource {
-    async fn verify(&self, pack_config: &PackConfig) -> ModVerificationResult {
-        let mod_id = self.project_id as i32;
+    async fn verify(&self, _: &PackConfig) -> ModVerificationResult {
+        let mod_id = self.project_id;
         let furse_mod = FURSE.get_mod(mod_id).await?;
         if furse_mod.allow_mod_distribution == Some(false) {
             return Err(ModVerificationError::DistributionDenied);
         }
-        if let Some(file_id) = self.file_id {
-            // Verify it exists by fetching it
-            FURSE.get_mod_file(mod_id, file_id as i32).await?;
-        } else {
-            let furse_files = FURSE
-                .get_mod_files(mod_id)
-                .await?
-                .into_iter()
-                .filter_map(|f| {
-                    if !f.game_versions.contains(&pack_config.minecraft_version) {
-                        return None;
-                    }
-                    f.download_url
-                        .map(|_| format!("{} ({}, {:?})", f.id, f.file_name, f.game_versions))
-                })
-                .collect::<Vec<_>>();
-            return Err(ModVerificationError::NoFileSpecified(furse_files));
-        }
-        Ok(furse_mod.into())
+        let file = FURSE.get_mod_file(mod_id, self.file_id).await?;
+        Ok(ModVerificationInfo {
+            mod_: furse_mod.into(),
+            dependencies: file.dependencies,
+        })
     }
 
     async fn download(&self, dest_dir: &Path) -> ModDownloadResult {
-        let file_meta = FURSE
-            .get_mod_file(
-                self.project_id as i32,
-                self.file_id.expect("verified to exist") as i32,
-            )
-            .await?;
+        let file_meta = FURSE.get_mod_file(self.project_id, self.file_id).await?;
         let dest_file = dest_dir.join(&file_meta.file_name);
         if !file_meta.hashes.is_empty() && dest_file.exists() {
             // Check if we already have the file.
@@ -348,12 +362,17 @@ impl ModSource for ModrinthModSource {
             return Err(ModVerificationError::NotAMod);
         }
 
-        Ok(ferinth_mod.into())
+        todo!("Dependencies")
     }
 
     async fn download(&self, _dest_dir: &Path) -> ModDownloadResult {
         todo!("No Modrinth file download support yet")
     }
+}
+
+struct ModVerificationInfo {
+    mod_: LoadedMod,
+    dependencies: Vec<FileDependency>,
 }
 
 struct LoadedMod {

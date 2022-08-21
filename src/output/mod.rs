@@ -96,7 +96,7 @@ pub fn create_curseforge_zip(
             .filter(|m| m.side.on_client())
             .map(|m| ManifestFile {
                 project_id: m.source.project_id,
-                file_id: m.source.file_id.expect("verified earlier"),
+                file_id: m.source.file_id,
                 required: true,
             })
             .collect(),

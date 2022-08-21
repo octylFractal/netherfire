@@ -35,8 +35,8 @@ pub enum ManifestType {
 #[derive(Debug, Serialize)]
 pub struct ManifestFile {
     #[serde(rename = "projectID")]
-    pub project_id: u32,
+    pub project_id: i32,
     #[serde(rename = "fileID")]
-    pub file_id: u32,
+    pub file_id: i32,
     pub required: bool,
 }
