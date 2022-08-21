@@ -112,6 +112,8 @@ pub fn create_curseforge_zip(
 
 #[derive(Debug, Error)]
 pub enum CreateServerBaseError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("Cloning directory {0} failed: {1}")]
     CloneDir(String, #[source] CloneDirError),
     #[error("Error downloading mods: {0}")]
@@ -123,6 +125,9 @@ pub async fn create_server_base(
     source_dir: &Path,
     output_dir: PathBuf,
 ) -> Result<(), CreateServerBaseError> {
+    // Wipe the output dir first, so we don't have leftover files
+    std::fs::remove_dir_all(&output_dir)?;
+
     clone_dir(
         source_dir.join(LIT_MODS),
         output_dir.join(LIT_MODS),
