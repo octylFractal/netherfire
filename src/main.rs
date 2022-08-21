@@ -26,6 +26,7 @@ mod output;
 /// - `_CLIENT/` directory for client-only `mods/` and `overrides/`
 /// - `_SERVER/` directory for server-only `mods/` and `overrides/`
 #[derive(Parser)]
+#[clap(verbatim_doc_comment)]
 pub struct Netherfire {
     /// Modpack source folder.
     pub source: PathBuf,
