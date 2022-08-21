@@ -126,7 +126,9 @@ pub async fn create_server_base(
     output_dir: PathBuf,
 ) -> Result<(), CreateServerBaseError> {
     // Wipe the output dir first, so we don't have leftover files
-    std::fs::remove_dir_all(&output_dir)?;
+    if output_dir.exists() {
+        std::fs::remove_dir_all(&output_dir)?;
+    }
 
     clone_dir(
         source_dir.join(LIT_MODS),
