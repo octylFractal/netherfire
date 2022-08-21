@@ -109,7 +109,7 @@ impl ModConfig {
             .mods
             .curseforge
             .values()
-            .map(|v| v.source.file_id)
+            .map(|v| v.source.project_id)
             .collect::<HashSet<_>>();
         let verifications = self
             .mods
