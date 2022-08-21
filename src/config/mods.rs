@@ -77,7 +77,7 @@ pub enum ModVerificationError {
     #[error("The project exists, but is not a mod")]
     NotAMod,
     #[error("Required dependencies are not specified in the mods list: {0:?}")]
-    MissingRequiredDependencies(Vec<i32>),
+    MissingRequiredDependencies(Vec<String>),
     #[error("CurseForge Error: {0}")]
     Furse(#[from] furse::Error),
     #[error("Modrinth Error: {0}")]
@@ -130,7 +130,14 @@ impl ModConfig {
                         match dep.relation_type {
                             FileRelationType::RequiredDependency => {
                                 if !mods_by_id.contains(&dep.mod_id) {
-                                    missing_deps.push(dep.mod_id);
+                                    let dep_name = match FURSE.get_mod(dep.mod_id).await {
+                                        Ok(v) => v.name,
+                                        Err(e) => {
+                                            failures.insert(cfg_id.clone(), e.into());
+                                            continue;
+                                        }
+                                    };
+                                    missing_deps.push(dep_name);
                                 }
                             }
                             FileRelationType::OptionalDependency => {
