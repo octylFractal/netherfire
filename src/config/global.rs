@@ -18,7 +18,11 @@ pub static CONFIG: Lazy<GlobalConfig> = Lazy::new(|| {
 });
 
 pub static FURSE: Lazy<Furse> = Lazy::new(|| Furse::new(&CONFIG.curse_forge_api_key));
-pub static FERINTH: Lazy<Ferinth> = Lazy::new(Ferinth::new);
+pub static FERINTH: Lazy<Ferinth> = Lazy::new(|| Ferinth::new(
+    env!("CARGO_CRATE_NAME"),
+    Some(env!("CARGO_PKG_VERSION")),
+    Some("Octavia Togami")
+));
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GlobalConfig {
