@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use once_cell::sync::Lazy;
 use reflink::reflink_or_copy;
 use thiserror::Error;
+use tokio_util::io::SyncIoBridge;
 use walkdir::WalkDir;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::config::mods::ModsDownloadError;
+use crate::mod_site::{ModDownloadError, ModId, ModLoadingError, ModSite, Modrinth};
 use crate::output::curseforge_manifest::{
     CurseForgeManifest, ManifestFile, ManifestType, Minecraft, ModLoader,
 };
@@ -30,27 +32,41 @@ pub enum CreateCurseForgeZipError {
     Zip(#[from] zip::result::ZipError),
     #[error("Zipping directory {0} failed: {1}")]
     ZipDir(String, #[source] ZipDirError),
+    #[error("Zipping mod {0} failed: {1}")]
+    ZipMod(String, #[source] ZipModError),
 }
 
 static ZIP_OPTIONS: Lazy<zip::write::FileOptions> = Lazy::new(|| {
     zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated)
 });
 
-pub fn create_curseforge_zip(
+pub async fn create_curseforge_zip(
     pack: &PackConfig,
     mods: &ModConfig,
     source_dir: &Path,
     output_dir: PathBuf,
 ) -> Result<(), CreateCurseForgeZipError> {
-    if !mods.mods.modrinth.is_empty() {
-        todo!("Download Modrinth mods and add them to the zip")
-    }
-
     std::fs::create_dir_all(&output_dir)?;
     let output_file = output_dir.join(format!("{} ({}).zip", pack.name, pack.version));
 
-    let mut zip = ZipWriter::new(std::fs::File::create(output_file)?);
+    let mut zip = ZipWriter::new(std::fs::File::create(&output_file)?);
 
+    for (cfg_id, mod_) in &mods.mods.modrinth {
+        zip_modrinth(
+            mod_.source.clone(),
+            &mut zip,
+            &[LIT_OVERRIDES, LIT_MODS].join("/"),
+        )
+        .await
+        .map_err(|e| CreateCurseForgeZipError::ZipMod(cfg_id.clone(), e))?;
+
+        log::info!(
+            "[{}] Mod {} downloaded into {}.",
+            Modrinth::NAME,
+            cfg_id,
+            output_file.display()
+        );
+    }
     zip_dir(
         source_dir.join(LIT_MODS),
         &mut zip,
@@ -96,7 +112,7 @@ pub fn create_curseforge_zip(
             .filter(|m| m.side.on_client())
             .map(|m| ManifestFile {
                 project_id: m.source.project_id,
-                file_id: m.source.file_id,
+                file_id: m.source.version_id,
                 required: true,
             })
             .collect(),
@@ -130,14 +146,18 @@ pub async fn create_server_base(
         std::fs::remove_dir_all(&output_dir)?;
     }
 
+    std::fs::create_dir_all(&output_dir)?;
+    let mods_folder = output_dir.join(LIT_MODS);
+    std::fs::create_dir_all(&mods_folder)?;
+
     clone_dir(
         source_dir.join(LIT_MODS),
-        output_dir.join(LIT_MODS),
+        &mods_folder,
         CreateServerBaseError::CloneDir,
     )?;
     clone_dir(
         source_dir.join(LIT_SERVER).join(LIT_MODS),
-        output_dir.join(LIT_MODS),
+        &mods_folder,
         CreateServerBaseError::CloneDir,
     )?;
     clone_dir(
@@ -151,8 +171,7 @@ pub async fn create_server_base(
         CreateServerBaseError::CloneDir,
     )?;
 
-    mods.download(&output_dir.join(LIT_MODS), |side| side.on_server())
-        .await?;
+    mods.download(&mods_folder, |side| side.on_server()).await?;
 
     Ok(())
 }
@@ -251,6 +270,7 @@ pub enum ZipDirError {
     Zip(#[from] zip::result::ZipError),
 }
 
+/// Walk [from] and zip its files to [to].
 fn zip_dir<F, W, E, EF>(
     from: F,
     to: &mut ZipWriter<W>,
@@ -262,43 +282,70 @@ where
     W: Write + Seek,
     EF: FnOnce(String, ZipDirError) -> E,
 {
+    fn zip_dir_impl<F: AsRef<Path>, W: Write + Seek>(
+        from: F,
+        to: &mut ZipWriter<W>,
+        to_prefix: &str,
+    ) -> Result<(), ZipDirError> {
+        let from = from.as_ref();
+        if !from.exists() {
+            log::debug!("Skipped zipping {} as it did not exist", from.display());
+            return Ok(());
+        }
+        for entry in WalkDir::new(from) {
+            let entry = entry?;
+            let ft = entry.file_type();
+            let src_path = entry.into_path();
+            let dest_path = [
+                to_prefix,
+                src_path
+                    .strip_prefix(from)
+                    .expect("walked path must contain `from` as prefix")
+                    .to_str()
+                    .expect("must be zip-able path"),
+            ]
+            .join("/");
+            if ft.is_file() {
+                to.start_file(&dest_path, *ZIP_OPTIONS)?;
+                std::io::copy(&mut std::fs::File::open(&src_path)?, to)?;
+                log::debug!("Copied {} to {}", src_path.display(), dest_path);
+            } else {
+                log::debug!("Skipped {} as it is not a regular file", src_path.display());
+            }
+        }
+
+        Ok(())
+    }
+
     let from = from.as_ref();
     tokio::task::block_in_place(|| zip_dir_impl(from, to, to_prefix))
         .map_err(|e| error_mapper(from.display().to_string(), e))
 }
 
-/// Walk [from] and zip its files to [to].
-fn zip_dir_impl<F: AsRef<Path>, W: Write + Seek>(
-    from: F,
+#[derive(Debug, Error)]
+pub enum ZipModError {
+    #[error("I/O Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Mod loading Error: {0}")]
+    ModLoading(#[from] ModLoadingError),
+    #[error("Mod download Error: {0}")]
+    ModDownload(#[from] ModDownloadError),
+    #[error("Zip Error: {0}")]
+    Zip(#[from] zip::result::ZipError),
+}
+
+async fn zip_modrinth<W>(
+    mod_id: ModId<String>,
     to: &mut ZipWriter<W>,
     to_prefix: &str,
-) -> Result<(), ZipDirError> {
-    let from = from.as_ref();
-    if !from.exists() {
-        log::debug!("Skipped zipping {} as it did not exist", from.display());
-        return Ok(());
-    }
-    for entry in WalkDir::new(from) {
-        let entry = entry?;
-        let ft = entry.file_type();
-        let src_path = entry.into_path();
-        let dest_path = [
-            to_prefix,
-            src_path
-                .strip_prefix(from)
-                .expect("walked path must contain `from` as prefix")
-                .to_str()
-                .expect("must be zip-able path"),
-        ]
-        .join("/");
-        if ft.is_file() {
-            to.start_file(&dest_path, *ZIP_OPTIONS)?;
-            std::io::copy(&mut std::fs::File::open(&src_path)?, to)?;
-            log::debug!("Copied {} to {}", src_path.display(), dest_path);
-        } else {
-            log::debug!("Skipped {} as it is not a regular file", src_path.display());
-        }
-    }
+) -> Result<(), ZipModError>
+where
+    W: Write + Seek,
+{
+    let mod_info = Modrinth.load_file(mod_id.clone()).await?;
+    to.start_file([to_prefix, &mod_info.filename].join("/"), *ZIP_OPTIONS)?;
+    let content = Modrinth.download(mod_id).await?;
+    tokio::task::block_in_place(|| std::io::copy(&mut SyncIoBridge::new(content), to))?;
 
     Ok(())
 }

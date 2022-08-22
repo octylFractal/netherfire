@@ -34,6 +34,8 @@ digest = "0.10.3"
 sha1 = "0.10.1"
 md-5 = "0.10.1"
 
+sha2 = "0.10.2"
+
 [dependencies.clap]
 version = "3.1.18"
 features = ["derive"]
@@ -51,5 +53,5 @@ version = "1.18.2"
 features = ["rt-multi-thread", "macros", "sync", "fs", "io-std", "io-util"]
 
 [dependencies.tokio-util]
-version = "0.7.2"
-features = ["compat"]
+version = "0.7.3"
+features = ["compat", "io", "io-util"]
