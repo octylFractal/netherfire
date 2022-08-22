@@ -129,14 +129,17 @@ impl ModConfig {
         }
     }
 
-    async fn verify_mod<K: Display + Eq + Hash>(
+    async fn verify_mod<K, S>(
         &self,
         failures: &mut HashMap<String, ModVerificationError>,
         mods_by_id: &HashSet<K>,
         cfg_id: String,
         loaded_mod: ModFileInfo<K>,
-        site: impl ModSite<Id = K>,
-    ) {
+        site: S,
+    ) where
+        K: Display + Eq + Hash,
+        S: ModSite<Id = K>,
+    {
         if !loaded_mod.project_info.distribution_allowed {
             failures.insert(cfg_id, ModVerificationError::DistributionDenied);
             return;
@@ -167,7 +170,8 @@ impl ModConfig {
                             }
                         };
                         log::info!(
-                            "[FYI] Missing optional dependency for {}: {}",
+                            "[{}] [FYI] Missing optional dependency for {}: {}",
+                            S::NAME,
                             cfg_id,
                             dep_name,
                         );
