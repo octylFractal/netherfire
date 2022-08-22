@@ -159,10 +159,17 @@ impl ModConfig {
                 }
                 ModDependencyKind::Optional => {
                     if !mods_by_id.contains(&dep.project_id) {
+                        let dep_name = match site.load_metadata(dep.project_id).await {
+                            Ok(v) => v.name,
+                            Err(e) => {
+                                failures.insert(cfg_id, e.into());
+                                return;
+                            }
+                        };
                         log::info!(
                             "[FYI] Missing optional dependency for {}: {}",
                             cfg_id,
-                            dep.project_id
+                            dep_name,
                         );
                     }
                 }
