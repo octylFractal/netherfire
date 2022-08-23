@@ -28,6 +28,8 @@ pub trait ModSite {
 
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult;
 
+    async fn load_metadata_by_version(&self, version_id: Self::Id) -> Option<ModLoadingResult>;
+
     async fn load_file(&self, id: ModId<Self::Id>) -> ModFileLoadingResult<Self::Id>;
 
     async fn download(&self, id: ModId<Self::Id>) -> ModDownloadResult;
@@ -51,6 +53,10 @@ impl ModSite for CurseForge {
         })
     }
 
+    async fn load_metadata_by_version(&self, _: Self::Id) -> Option<ModLoadingResult> {
+        None
+    }
+
     async fn load_file(&self, id: ModId<Self::Id>) -> ModFileLoadingResult<Self::Id> {
         let project_info = self.load_metadata(id.project_id).await?;
         let file = FURSE.get_mod_file(id.project_id, id.version_id).await?;
@@ -72,7 +78,7 @@ impl ModSite for CurseForge {
                 .dependencies
                 .into_iter()
                 .map(|d| ModDependency {
-                    project_id: d.mod_id,
+                    id: DependencyId::Project(d.mod_id),
                     kind: match d.relation_type {
                         FileRelationType::RequiredDependency => ModDependencyKind::Required,
                         FileRelationType::OptionalDependency => ModDependencyKind::Optional,
@@ -123,6 +129,15 @@ impl ModSite for Modrinth {
         })
     }
 
+    async fn load_metadata_by_version(&self, version_id: Self::Id) -> Option<ModLoadingResult> {
+        let version_info = match FERINTH.get_version(&version_id).await {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e.into())),
+        };
+
+        Some(self.load_metadata(version_info.project_id).await)
+    }
+
     async fn load_file(&self, id: ModId<Self::Id>) -> ModFileLoadingResult<Self::Id> {
         let project_info = self.load_metadata(id.project_id).await?;
         let version = FERINTH.get_version(&id.version_id).await?;
@@ -132,21 +147,31 @@ impl ModSite for Modrinth {
             .find(|f| f.primary)
             .expect("no primary file");
 
-        Ok(ModFileInfo {
-            project_info,
-            filename: file_meta.filename,
-            dependencies: version
-                .dependencies
-                .into_iter()
-                .map(|d| ModDependency {
-                    project_id: d.project_id.expect("no project ID for dependency"),
+        let dependencies = version
+            .dependencies
+            .into_iter()
+            .map(|d| {
+                let id = d.project_id.clone().map(DependencyId::Project)
+                    .or_else(|| d.version_id.clone().map(DependencyId::Version))
+                    .unwrap_or_else(|| panic!(
+                        "one of either project_id or version_id must be set; dependency {:?} from {}",
+                        d,
+                        project_info.name,
+                    ));
+                ModDependency {
+                    id,
                     kind: match d.dependency_type {
                         DependencyType::Required => ModDependencyKind::Required,
                         DependencyType::Optional => ModDependencyKind::Optional,
                         _ => ModDependencyKind::Other,
                     },
-                })
-                .collect(),
+                }
+            })
+            .collect();
+        Ok(ModFileInfo {
+            project_info,
+            filename: file_meta.filename,
+            dependencies,
             hash: Some(Hash {
                 algo: HashAlgorithm::Sha512,
                 value: file_meta.hashes.sha512,
@@ -257,8 +282,14 @@ pub struct ModInfo {
 
 #[derive(Debug)]
 pub struct ModDependency<K> {
-    pub project_id: K,
+    pub id: DependencyId<K>,
     pub kind: ModDependencyKind,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum DependencyId<K> {
+    Project(K),
+    Version(K),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

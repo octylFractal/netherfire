@@ -12,8 +12,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::mod_site::{
-    CurseForge, ModDependencyKind, ModDownloadError, ModFileInfo, ModFileLoadingResult, ModId,
-    ModLoadingError, ModSite, Modrinth,
+    CurseForge, DependencyId, ModDependencyKind, ModDownloadError, ModFileInfo,
+    ModFileLoadingResult, ModId, ModLoadingError, ModSite, Modrinth,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,70 +110,79 @@ impl ModConfig {
         mods: &HashMap<String, Mod<K>>,
         site: impl ModSite<Id = K> + Clone + Send + Sync + 'static,
     ) {
-        let mut mods_by_id = HashSet::with_capacity(mods.len());
+        let mut mods_by_project_id = HashSet::with_capacity(mods.len());
+        let mut mods_by_version_id = HashSet::with_capacity(mods.len());
         let mut verifications = Vec::with_capacity(mods.len());
         for (k, m) in mods.iter().sorted_by_key(|(k, _)| k.to_string()) {
-            mods_by_id.insert(m.source.project_id.clone());
+            mods_by_project_id.insert(m.source.project_id.clone());
+            mods_by_version_id.insert(m.source.version_id.clone());
             verifications.push((k.to_string(), submit_load(m.source.clone(), site.clone())));
         }
         for (cfg_id, verification_ftr) in verifications {
-            match verification_ftr.await.expect("tokio failure") {
-                Err(e) => {
-                    failures.insert(cfg_id.clone(), e.into());
-                }
-                Ok(loaded_mod) => {
-                    self.verify_mod(failures, &mods_by_id, cfg_id, loaded_mod, site.clone())
-                        .await
-                }
+            let failure = match verification_ftr.await.expect("tokio failure") {
+                Err(e) => Some(e.into()),
+                Ok(loaded_mod) => self
+                    .verify_mod(
+                        &mods_by_project_id,
+                        &mods_by_version_id,
+                        &cfg_id,
+                        loaded_mod,
+                        &site,
+                    )
+                    .await
+                    .err(),
+            };
+            if let Some(failure) = failure {
+                failures.insert(cfg_id, failure);
             }
         }
     }
 
     async fn verify_mod<K, S>(
         &self,
-        failures: &mut HashMap<String, ModVerificationError>,
-        mods_by_id: &HashSet<K>,
-        cfg_id: String,
+        mods_by_project_id: &HashSet<K>,
+        mods_by_version_id: &HashSet<K>,
+        cfg_id: &str,
         loaded_mod: ModFileInfo<K>,
-        site: S,
-    ) where
+        site: &S,
+    ) -> Result<(), ModVerificationError>
+    where
         K: Display + Eq + Hash,
         S: ModSite<Id = K>,
     {
         if !loaded_mod.project_info.distribution_allowed {
-            failures.insert(cfg_id, ModVerificationError::DistributionDenied);
-            return;
+            return Err(ModVerificationError::DistributionDenied);
         }
         // Verify that all dependencies are specified.
         let mut missing_deps = Vec::new();
         for dep in loaded_mod.dependencies {
             match dep.kind {
                 ModDependencyKind::Required => {
-                    if !mods_by_id.contains(&dep.project_id) {
-                        let dep_name = match site.load_metadata(dep.project_id).await {
-                            Ok(v) => v.name,
-                            Err(e) => {
-                                failures.insert(cfg_id, e.into());
-                                return;
-                            }
-                        };
-                        missing_deps.push(dep_name);
+                    if let Some(v) = Self::get_dep_name_if_missing(
+                        site,
+                        dep.id,
+                        mods_by_project_id,
+                        mods_by_version_id,
+                    )
+                    .await?
+                    {
+                        missing_deps.push(v);
                     }
                 }
                 ModDependencyKind::Optional => {
-                    if !mods_by_id.contains(&dep.project_id) {
-                        let dep_name = match site.load_metadata(dep.project_id).await {
-                            Ok(v) => v.name,
-                            Err(e) => {
-                                failures.insert(cfg_id, e.into());
-                                return;
-                            }
-                        };
+                    if let Some(v) = Self::get_dep_name_if_missing(
+                        site,
+                        dep.id,
+                        mods_by_project_id,
+                        mods_by_version_id,
+                    )
+                    .await?
+                    {
                         log::info!(
                             "[{}] [FYI] Missing optional dependency for {}: {}",
                             S::NAME,
                             cfg_id,
-                            dep_name,
+                            v,
                         );
                     }
                 }
@@ -181,17 +190,52 @@ impl ModConfig {
             };
         }
         if !missing_deps.is_empty() {
-            failures.insert(
-                cfg_id,
-                ModVerificationError::MissingRequiredDependencies(missing_deps),
-            );
-            return;
+            return Err(ModVerificationError::MissingRequiredDependencies(
+                missing_deps,
+            ));
         }
         log::info!(
-            "Mod {} (in config: {}) verified.",
+            "[{}] Mod {} (in config: {}) verified.",
+            S::NAME,
             loaded_mod.project_info.name,
             cfg_id
         );
+
+        Ok(())
+    }
+
+    async fn get_dep_name_if_missing<K, S>(
+        site: &S,
+        id: DependencyId<K>,
+        mods_by_project_id: &HashSet<K>,
+        mods_by_version_id: &HashSet<K>,
+    ) -> Result<Option<String>, ModVerificationError>
+    where
+        K: Display + Eq + Hash,
+        S: ModSite<Id = K>,
+    {
+        match id {
+            DependencyId::Project(project_id) => {
+                if !(mods_by_project_id.contains(&project_id)) {
+                    site.load_metadata(project_id)
+                        .await
+                        .map(|v| Some(v.name))
+                        .map_err(Into::into)
+                } else {
+                    Ok(None)
+                }
+            }
+            DependencyId::Version(version_id) => {
+                if !mods_by_version_id.contains(&version_id) {
+                    site.load_metadata_by_version(version_id).await
+                        .expect("sites that provide only a version in dependencies must allow lookup by version")
+                        .map(|v| Some(v.name))
+                        .map_err(Into::into)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 
     pub(crate) async fn download<F>(
