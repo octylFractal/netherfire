@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::hash::Hash;
+use std::fmt::{Debug, Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use itertools::Itertools;
@@ -13,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use crate::mod_site::{
     CurseForge, DependencyId, ModDependencyKind, ModDownloadError, ModFileInfo,
-    ModFileLoadingResult, ModId, ModLoadingError, ModSite, Modrinth,
+    ModFileLoadingResult, ModId, ModIdValue, ModLoadingError, ModSite, Modrinth,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,18 +103,31 @@ impl ModConfig {
         Ok(())
     }
 
-    async fn verify_mods_site<K: Display + Eq + Hash + Clone + Send + Sync + 'static>(
+    async fn verify_mods_site<K>(
         &self,
         failures: &mut HashMap<String, ModVerificationError>,
         mods: &HashMap<String, Mod<K>>,
         site: impl ModSite<Id = K> + Clone + Send + Sync + 'static,
-    ) {
+    ) where
+        K: ModIdValue,
+    {
         let mut mods_by_project_id = HashSet::with_capacity(mods.len());
         let mut mods_by_version_id = HashSet::with_capacity(mods.len());
         let mut verifications = Vec::with_capacity(mods.len());
         for (k, m) in mods.iter().sorted_by_key(|(k, _)| k.to_string()) {
             mods_by_project_id.insert(m.source.project_id.clone());
             mods_by_version_id.insert(m.source.version_id.clone());
+            // Include the ignored mods in the mods_by* tables to skip them.
+            for ignored_mod in m.ignored_deps.iter() {
+                match ignored_mod.clone() {
+                    DependencyId::Project(project_id) => {
+                        mods_by_project_id.insert(project_id);
+                    }
+                    DependencyId::Version(version_id) => {
+                        mods_by_version_id.insert(version_id);
+                    }
+                }
+            }
             verifications.push((k.to_string(), submit_load(m.source.clone(), site.clone())));
         }
         for (cfg_id, verification_ftr) in verifications {
@@ -147,7 +159,7 @@ impl ModConfig {
         site: &S,
     ) -> Result<(), ModVerificationError>
     where
-        K: Display + Eq + Hash,
+        K: ModIdValue,
         S: ModSite<Id = K>,
     {
         if !loaded_mod.project_info.distribution_allowed {
@@ -160,29 +172,30 @@ impl ModConfig {
                 ModDependencyKind::Required => {
                     if let Some(v) = Self::get_dep_name_if_missing(
                         site,
-                        dep.id,
+                        dep.id.clone(),
                         mods_by_project_id,
                         mods_by_version_id,
                     )
                     .await?
                     {
-                        missing_deps.push(v);
+                        missing_deps.push(format!("{} ({:?})", v, dep.id));
                     }
                 }
                 ModDependencyKind::Optional => {
                     if let Some(v) = Self::get_dep_name_if_missing(
                         site,
-                        dep.id,
+                        dep.id.clone(),
                         mods_by_project_id,
                         mods_by_version_id,
                     )
                     .await?
                     {
                         log::info!(
-                            "[{}] [FYI] Missing optional dependency for {}: {}",
+                            "[{}] [FYI] Missing optional dependency for {}: {} ({:?})",
                             S::NAME,
                             cfg_id,
                             v,
+                            dep.id,
                         );
                     }
                 }
@@ -211,7 +224,7 @@ impl ModConfig {
         mods_by_version_id: &HashSet<K>,
     ) -> Result<Option<String>, ModVerificationError>
     where
-        K: Display + Eq + Hash,
+        K: ModIdValue,
         S: ModSite<Id = K>,
     {
         match id {
@@ -280,7 +293,7 @@ impl ModConfig {
         mut side_test: F,
     ) where
         F: FnMut(ModSide) -> bool,
-        K: Clone + Send + Sync + 'static,
+        K: ModIdValue,
         S: ModSite<Id = K> + Copy + Send + Sync + 'static,
     {
         let downloads = mods
@@ -312,10 +325,13 @@ impl ModConfig {
     }
 }
 
-fn submit_load<K: Send + Sync + 'static>(
+fn submit_load<K>(
     mod_id: ModId<K>,
     site: impl ModSite<Id = K> + Send + Sync + 'static,
-) -> JoinHandle<ModFileLoadingResult<K>> {
+) -> JoinHandle<ModFileLoadingResult<K>>
+where
+    K: ModIdValue,
+{
     static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(30));
 
     tokio::task::spawn(async move {
@@ -330,7 +346,7 @@ fn submit_download<K, S>(
     dest_dir: &Path,
 ) -> JoinHandle<Result<PathBuf, ModDownloadToFileError>>
 where
-    K: Clone + Send + Sync + 'static,
+    K: ModIdValue,
     S: ModSite<Id = K> + Send + Sync + 'static,
 {
     static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
@@ -374,11 +390,14 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Mod<K> {
+pub struct Mod<K: ModIdValue> {
     #[serde(flatten)]
     pub source: ModId<K>,
     #[serde(default)]
     pub side: ModSide,
+    /// Dependencies to ignore when validating.
+    #[serde(default)]
+    pub ignored_deps: Vec<DependencyId<K>>,
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq)]

@@ -14,8 +14,12 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::config::global::{FERINTH, FURSE};
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
-pub struct ModId<K> {
+pub trait ModIdValue: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {}
+
+impl<T> ModIdValue for T where T: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Deserialize)]
+pub struct ModId<K: ModIdValue> {
     pub project_id: K,
     pub version_id: K,
 }
@@ -24,7 +28,7 @@ pub struct ModId<K> {
 pub trait ModSite {
     const NAME: &'static str;
 
-    type Id;
+    type Id: ModIdValue;
 
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult;
 
@@ -286,10 +290,27 @@ pub struct ModDependency<K> {
     pub kind: ModDependencyKind,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize)]
+#[serde(from = "ExplicitDependencyId<K>")]
 pub enum DependencyId<K> {
     Project(K),
     Version(K),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExplicitDependencyId<K> {
+    Project { project_id: K },
+    Version { version_id: K },
+}
+
+impl<K> From<ExplicitDependencyId<K>> for DependencyId<K> {
+    fn from(id: ExplicitDependencyId<K>) -> Self {
+        match id {
+            ExplicitDependencyId::Project { project_id } => DependencyId::Project(project_id),
+            ExplicitDependencyId::Version { version_id } => DependencyId::Version(version_id),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
