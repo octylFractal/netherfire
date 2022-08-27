@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use crate::mod_site::{
     CurseForge, DependencyId, ModDependencyKind, ModDownloadError, ModFileInfo,
     ModFileLoadingResult, ModId, ModIdValue, ModLoadingError, ModSite, Modrinth,
 };
+use crate::progress::{steady_tick_duration, style_bar};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModConfig {
@@ -88,13 +90,16 @@ impl Display for ModsDownloadError {
 
 impl ModConfig {
     pub(crate) async fn verify(&self) -> Result<(), ModsVerificationError> {
-        let mut failures = HashMap::<String, ModVerificationError>::new();
+        let multi = MultiProgress::new();
 
-        self.verify_mods_site(&mut failures, &self.mods.curseforge, CurseForge)
-            .await;
+        let cf_verify = Self::submit_verify_site(CurseForge, &multi, &self.mods.curseforge);
 
-        self.verify_mods_site(&mut failures, &self.mods.modrinth, Modrinth)
-            .await;
+        let modrinth_verify = Self::submit_verify_site(Modrinth, &multi, &self.mods.modrinth);
+
+        let mut failures = cf_verify.await.expect("tokio error");
+        for (k, v) in modrinth_verify.await.expect("tokio error").drain() {
+            failures.insert(k, v);
+        }
 
         if !failures.is_empty() {
             return Err(ModsVerificationError { failures });
@@ -103,18 +108,36 @@ impl ModConfig {
         Ok(())
     }
 
-    async fn verify_mods_site<K>(
-        &self,
+    fn submit_verify_site<S>(
+        site: S,
+        multi: &MultiProgress,
+        mods: &HashMap<String, Mod<S::Id>>,
+    ) -> JoinHandle<HashMap<String, ModVerificationError>>
+    where
+        S: ModSite,
+    {
+        let multi = multi.clone();
+        let mods = mods.clone();
+        tokio::spawn(async move {
+            let mut failures = HashMap::<String, ModVerificationError>::new();
+            Self::verify_mods_site(&mut failures, multi, mods, site).await;
+            failures
+        })
+    }
+
+    async fn verify_mods_site<K, S>(
         failures: &mut HashMap<String, ModVerificationError>,
-        mods: &HashMap<String, Mod<K>>,
-        site: impl ModSite<Id = K> + Clone + Send + Sync + 'static,
+        multi: MultiProgress,
+        mods: HashMap<String, Mod<K>>,
+        site: S,
     ) where
         K: ModIdValue,
+        S: ModSite<Id = K> + Clone + Send + Sync + 'static,
     {
         let mut mods_by_project_id = HashSet::with_capacity(mods.len());
         let mut mods_by_version_id = HashSet::with_capacity(mods.len());
         let mut verifications = Vec::with_capacity(mods.len());
-        for (k, m) in mods.iter().sorted_by_key(|(k, _)| k.to_string()) {
+        for (k, m) in mods.into_iter().sorted_by_key(|(k, _)| k.to_string()) {
             mods_by_project_id.insert(m.source.project_id.clone());
             mods_by_version_id.insert(m.source.version_id.clone());
             // Include the ignored mods in the mods_by* tables to skip them.
@@ -128,30 +151,50 @@ impl ModConfig {
                     }
                 }
             }
-            verifications.push((k.to_string(), submit_load(m.source.clone(), site.clone())));
+
+            let progress_bar = multi.add(ProgressBar::new_spinner().with_message(k.clone()));
+            verifications.push((
+                k,
+                submit_load(progress_bar.clone(), m.source.clone(), site),
+                progress_bar,
+            ));
         }
-        for (cfg_id, verification_ftr) in verifications {
+        for (cfg_id, verification_ftr, progress_bar) in verifications {
             let failure = match verification_ftr.await.expect("tokio failure") {
-                Err(e) => Some(e.into()),
-                Ok(loaded_mod) => self
-                    .verify_mod(
-                        &mods_by_project_id,
-                        &mods_by_version_id,
-                        &cfg_id,
-                        loaded_mod,
-                        &site,
-                    )
-                    .await
-                    .err(),
+                Err(e) => Err(e.into()),
+                Ok(loaded_mod) => Self::verify_mod(
+                    &mods_by_project_id,
+                    &mods_by_version_id,
+                    &cfg_id,
+                    loaded_mod.clone(),
+                    &site,
+                )
+                .await
+                .map(|_| loaded_mod),
             };
-            if let Some(failure) = failure {
-                failures.insert(cfg_id, failure);
+            progress_bar.disable_steady_tick();
+            match failure {
+                Ok(mod_info) => {
+                    progress_bar.finish_with_message(format!(
+                        "[{}] Mod {} (in config: {}) verified.",
+                        S::NAME,
+                        mod_info.project_info.name,
+                        cfg_id
+                    ));
+                }
+                Err(failure) => {
+                    progress_bar.finish_with_message(format!(
+                        "[{}] Mod (in config: {}) FAILED verification.",
+                        S::NAME,
+                        cfg_id
+                    ));
+                    failures.insert(cfg_id, failure);
+                }
             }
         }
     }
 
     async fn verify_mod<K, S>(
-        &self,
         mods_by_project_id: &HashSet<K>,
         mods_by_version_id: &HashSet<K>,
         cfg_id: &str,
@@ -207,12 +250,6 @@ impl ModConfig {
                 missing_deps,
             ));
         }
-        log::info!(
-            "[{}] Mod {} (in config: {}) verified.",
-            S::NAME,
-            loaded_mod.project_info.name,
-            cfg_id
-        );
 
         Ok(())
     }
@@ -253,6 +290,7 @@ impl ModConfig {
 
     pub(crate) async fn download<F>(
         &self,
+        multi: MultiProgress,
         dest_dir: &Path,
         side_test: F,
     ) -> Result<(), ModsDownloadError>
@@ -263,6 +301,7 @@ impl ModConfig {
 
         Self::download_from_site(
             CurseForge,
+            multi.clone(),
             dest_dir,
             &mut failures,
             &self.mods.curseforge,
@@ -271,6 +310,7 @@ impl ModConfig {
         .await;
         Self::download_from_site(
             Modrinth,
+            multi.clone(),
             dest_dir,
             &mut failures,
             &self.mods.modrinth,
@@ -287,6 +327,7 @@ impl ModConfig {
 
     async fn download_from_site<K, S, F>(
         site: S,
+        multi: MultiProgress,
         dest_dir: &Path,
         failures: &mut HashMap<String, ModDownloadToFileError>,
         mods: &HashMap<String, Mod<K>>,
@@ -294,40 +335,32 @@ impl ModConfig {
     ) where
         F: FnMut(ModSide) -> bool,
         K: ModIdValue,
-        S: ModSite<Id = K> + Copy + Send + Sync + 'static,
+        S: ModSite<Id = K>,
     {
         let downloads = mods
             .iter()
             .filter(|(_, m)| side_test(m.side))
-            .sorted_by_key(|(k, _)| k.to_string())
+            .sorted_by_key(|(k, _)| k.as_str())
             .map(|(k, m)| {
                 (
-                    k.to_string(),
-                    submit_download(m.source.clone(), site, dest_dir),
+                    k.clone(),
+                    submit_download(multi.clone(), k.clone(), m.source.clone(), site, dest_dir),
                 )
             })
             .collect::<Vec<_>>();
         for (cfg_id, dl_ftr) in downloads {
-            match dl_ftr.await.expect("tokio failure") {
-                Err(e) => {
-                    failures.insert(cfg_id.clone(), e);
-                }
-                Ok(dest) => {
-                    log::info!(
-                        "[{}] Mod {} downloaded to {}.",
-                        S::NAME,
-                        cfg_id,
-                        dest.display()
-                    );
-                }
+            if let Err(e) = dl_ftr.await.expect("tokio failure") {
+                failures.insert(cfg_id.clone(), e);
             }
         }
+        multi.clear().expect("bar cleared");
     }
 }
 
 fn submit_load<K>(
+    progress_bar: ProgressBar,
     mod_id: ModId<K>,
-    site: impl ModSite<Id = K> + Send + Sync + 'static,
+    site: impl ModSite<Id = K>,
 ) -> JoinHandle<ModFileLoadingResult<K>>
 where
     K: ModIdValue,
@@ -336,24 +369,29 @@ where
 
     tokio::task::spawn(async move {
         let _guard = CONCURRENCY_LIMITER.acquire().await.expect("tokio failure");
+        progress_bar.enable_steady_tick(steady_tick_duration());
         site.load_file(mod_id).await
     })
 }
 
 fn submit_download<K, S>(
+    multi: MultiProgress,
+    cfg_id: String,
     mod_id: ModId<K>,
     site: S,
     dest_dir: &Path,
 ) -> JoinHandle<Result<PathBuf, ModDownloadToFileError>>
 where
     K: ModIdValue,
-    S: ModSite<Id = K> + Send + Sync + 'static,
+    S: ModSite<Id = K>,
 {
-    static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
+    static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(5));
 
     let dest_dir = dest_dir.to_owned();
     tokio::task::spawn(async move {
+        let progress_bar = multi.add(ProgressBar::new_spinner().with_message(cfg_id.to_string()));
         let _guard = CONCURRENCY_LIMITER.acquire().await.expect("tokio failure");
+        progress_bar.enable_steady_tick(steady_tick_duration());
         let file_meta = site.load_file(mod_id.clone()).await?;
         let dest_file = dest_dir.join(&file_meta.filename);
         if let Some(hash) = file_meta.hash {
@@ -361,29 +399,36 @@ where
                 // Check if we already have the file.
                 let content = tokio::fs::read(&dest_file).await?;
                 if hash.check(&content) {
-                    log::debug!(
-                        "[{}] Skipping {}, {} hashes matched",
+                    progress_bar.disable_steady_tick();
+                    progress_bar.finish_with_message(format!(
+                        "[{}] Found cached {}",
                         S::NAME,
-                        file_meta.filename,
-                        hash.algo
-                    );
+                        file_meta.filename
+                    ));
+                    multi.remove(&progress_bar);
                     return Ok(dest_file);
                 }
             }
         }
 
-        log::debug!(
-            "[{}] Downloading {} to {}",
-            S::NAME,
-            file_meta.filename,
-            dest_file.display()
-        );
+        progress_bar.disable_steady_tick();
+        progress_bar.set_style(style_bar());
+        progress_bar.set_length(file_meta.file_length);
+        progress_bar.set_message(format!("[{}] {}", S::NAME, file_meta.filename));
 
         tokio::io::copy(
-            &mut site.download(mod_id).await?,
+            &mut progress_bar.wrap_async_read(site.download(mod_id).await?),
             &mut tokio::fs::File::create(&dest_file).await?,
         )
         .await?;
+
+        progress_bar.reset();
+        progress_bar.set_style(ProgressStyle::default_spinner());
+        progress_bar.finish_with_message(format!(
+            "[{}] Downloaded {}",
+            S::NAME,
+            file_meta.filename
+        ));
 
         Ok(dest_file)
     })

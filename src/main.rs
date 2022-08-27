@@ -16,6 +16,7 @@ use crate::output::{
 mod config;
 mod mod_site;
 mod output;
+mod progress;
 
 /// Handles files for a Minecraft modpack.
 ///

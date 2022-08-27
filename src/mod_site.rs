@@ -1,7 +1,7 @@
-use digest::Digest;
 use std::fmt::{Debug, Display, Formatter};
 use std::pin::Pin;
 
+use digest::Digest;
 use ferinth::structures::project_structs::ProjectType;
 use ferinth::structures::version_structs::DependencyType;
 use furse::structures::file_structs::{FileRelationType, HashAlgo};
@@ -25,7 +25,7 @@ pub struct ModId<K: ModIdValue> {
 }
 
 #[async_trait::async_trait]
-pub trait ModSite {
+pub trait ModSite: Copy + Clone + Send + Sync + 'static {
     const NAME: &'static str;
 
     type Id: ModIdValue;
@@ -78,6 +78,7 @@ impl ModSite for CurseForge {
         Ok(ModFileInfo {
             project_info,
             filename: file.file_name,
+            file_length: file.file_length as u64,
             dependencies: file
                 .dependencies
                 .into_iter()
@@ -175,6 +176,7 @@ impl ModSite for Modrinth {
         Ok(ModFileInfo {
             project_info,
             filename: file_meta.filename,
+            file_length: file_meta.size as u64,
             dependencies,
             hash: Some(Hash {
                 algo: HashAlgorithm::Sha512,
@@ -231,15 +233,16 @@ pub enum ModDownloadError {
 pub type ModLoadingResult = Result<ModInfo, ModLoadingError>;
 pub type ModFileLoadingResult<K> = Result<ModFileInfo<K>, ModLoadingError>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModFileInfo<K> {
     pub project_info: ModInfo,
     pub filename: String,
+    pub file_length: u64,
     pub dependencies: Vec<ModDependency<K>>,
     pub hash: Option<Hash>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Hash {
     pub algo: HashAlgorithm,
     pub value: String,
@@ -278,13 +281,13 @@ impl Display for HashAlgorithm {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModInfo {
     pub name: String,
     pub distribution_allowed: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModDependency<K> {
     pub id: DependencyId<K>,
     pub kind: ModDependencyKind,
