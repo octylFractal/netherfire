@@ -9,15 +9,16 @@ use tokio_util::io::SyncIoBridge;
 use walkdir::WalkDir;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::config::mods::ModsDownloadError;
 use crate::mod_site::{ModDownloadError, ModId, ModLoadingError, ModSite, Modrinth};
 use crate::output::curseforge_manifest::{
     CurseForgeManifest, ManifestFile, ManifestType, Minecraft, ModLoader,
 };
+use crate::output::mod_download::{download_mods, ModsDownloadError};
 use crate::progress::{steady_tick_duration, style_bar};
 use crate::{ModConfig, PackConfig};
 
 mod curseforge_manifest;
+mod mod_download;
 
 const LIT_MODS: &str = "mods";
 const LIT_OVERRIDES: &str = "overrides";
@@ -207,8 +208,7 @@ pub async fn create_server_base(
     )?;
 
     progress_bar.set_message("Downloading remote mods...");
-    mods.download(multi.clone(), &mods_folder, |side| side.on_server())
-        .await?;
+    download_mods(mods, multi.clone(), &mods_folder, |side| side.on_server()).await?;
 
     multi.remove(&progress_bar);
     action_pb.set_message(format!("Created server base at '{}'", output_dir.display()));

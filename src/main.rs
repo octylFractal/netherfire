@@ -7,12 +7,14 @@ use log::LevelFilter;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::config::mods::{ModConfig, ModsVerificationError};
+use crate::checks::verify_mods::{verify_mods, ModsVerificationError};
+use crate::config::mods::ModConfig;
 use crate::config::pack::PackConfig;
 use crate::output::{
     create_curseforge_zip, create_server_base, CreateCurseForgeZipError, CreateServerBaseError,
 };
 
+mod checks;
 mod config;
 mod mod_site;
 mod output;
@@ -106,7 +108,7 @@ async fn main_for_result(args: Netherfire) -> Result<(), NetherfireError> {
         toml_load::<_, PackConfig, PackConfigLoadError>(args.source.join("config.toml"))?;
     let mod_config = toml_load::<_, ModConfig, ModConfigLoadError>(args.source.join("mods.toml"))?;
 
-    mod_config.verify(&pack_config.minecraft_version).await?;
+    verify_mods(&mod_config, &pack_config.minecraft_version).await?;
 
     if let Some(cf_zip) = args.create_curseforge_zip {
         create_curseforge_zip(&pack_config, &mod_config, &args.source, cf_zip).await?;
