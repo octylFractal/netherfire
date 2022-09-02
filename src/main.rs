@@ -106,7 +106,7 @@ async fn main_for_result(args: Netherfire) -> Result<(), NetherfireError> {
         toml_load::<_, PackConfig, PackConfigLoadError>(args.source.join("config.toml"))?;
     let mod_config = toml_load::<_, ModConfig, ModConfigLoadError>(args.source.join("mods.toml"))?;
 
-    mod_config.verify().await?;
+    mod_config.verify(&pack_config.minecraft_version).await?;
 
     if let Some(cf_zip) = args.create_curseforge_zip {
         create_curseforge_zip(&pack_config, &mod_config, &args.source, cf_zip).await?;

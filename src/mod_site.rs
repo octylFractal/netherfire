@@ -79,6 +79,7 @@ impl ModSite for CurseForge {
             project_info,
             filename: file.file_name,
             file_length: file.file_length as u64,
+            minecraft_versions: file.game_versions,
             dependencies: file
                 .dependencies
                 .into_iter()
@@ -177,6 +178,7 @@ impl ModSite for Modrinth {
             project_info,
             filename: file_meta.filename,
             file_length: file_meta.size as u64,
+            minecraft_versions: version.game_versions,
             dependencies,
             hash: Some(Hash {
                 algo: HashAlgorithm::Sha512,
@@ -238,6 +240,7 @@ pub struct ModFileInfo<K> {
     pub project_info: ModInfo,
     pub filename: String,
     pub file_length: u64,
+    pub minecraft_versions: Vec<String>,
     pub dependencies: Vec<ModDependency<K>>,
     pub hash: Option<Hash>,
 }

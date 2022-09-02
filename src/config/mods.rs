@@ -38,6 +38,11 @@ pub enum ModVerificationError {
     DistributionDenied,
     #[error("Required dependencies are not specified in the mods list: {0:?}")]
     MissingRequiredDependencies(Vec<String>),
+    #[error("Expected Minecraft version {expected}, but got {actual:?}")]
+    MinecraftVersionMismatch {
+        expected: String,
+        actual: Vec<String>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -89,12 +94,17 @@ impl Display for ModsDownloadError {
 }
 
 impl ModConfig {
-    pub(crate) async fn verify(&self) -> Result<(), ModsVerificationError> {
+    pub(crate) async fn verify(
+        &self,
+        minecraft_version: &str,
+    ) -> Result<(), ModsVerificationError> {
         let multi = MultiProgress::new();
 
-        let cf_verify = Self::submit_verify_site(CurseForge, &multi, &self.mods.curseforge);
+        let cf_verify =
+            Self::submit_verify_site(minecraft_version, CurseForge, &multi, &self.mods.curseforge);
 
-        let modrinth_verify = Self::submit_verify_site(Modrinth, &multi, &self.mods.modrinth);
+        let modrinth_verify =
+            Self::submit_verify_site(minecraft_version, Modrinth, &multi, &self.mods.modrinth);
 
         let mut failures = cf_verify.await.expect("tokio error");
         for (k, v) in modrinth_verify.await.expect("tokio error").drain() {
@@ -109,6 +119,7 @@ impl ModConfig {
     }
 
     fn submit_verify_site<S>(
+        minecraft_version: &str,
         site: S,
         multi: &MultiProgress,
         mods: &HashMap<String, Mod<S::Id>>,
@@ -118,14 +129,16 @@ impl ModConfig {
     {
         let multi = multi.clone();
         let mods = mods.clone();
+        let minecraft_version = minecraft_version.to_string();
         tokio::spawn(async move {
             let mut failures = HashMap::<String, ModVerificationError>::new();
-            Self::verify_mods_site(&mut failures, multi, mods, site).await;
+            Self::verify_mods_site(&minecraft_version, &mut failures, multi, mods, site).await;
             failures
         })
     }
 
     async fn verify_mods_site<K, S>(
+        minecraft_version: &String,
         failures: &mut HashMap<String, ModVerificationError>,
         multi: MultiProgress,
         mods: HashMap<String, Mod<K>>,
@@ -163,6 +176,7 @@ impl ModConfig {
             let failure = match verification_ftr.await.expect("tokio failure") {
                 Err(e) => Err(e.into()),
                 Ok(loaded_mod) => Self::verify_mod(
+                    minecraft_version,
                     &mods_by_project_id,
                     &mods_by_version_id,
                     &cfg_id,
@@ -195,6 +209,7 @@ impl ModConfig {
     }
 
     async fn verify_mod<K, S>(
+        minecraft_version: &String,
         mods_by_project_id: &HashSet<K>,
         mods_by_version_id: &HashSet<K>,
         cfg_id: &str,
@@ -207,6 +222,13 @@ impl ModConfig {
     {
         if !loaded_mod.project_info.distribution_allowed {
             return Err(ModVerificationError::DistributionDenied);
+        }
+        // Verify that the MC version matches
+        if !loaded_mod.minecraft_versions.contains(minecraft_version) {
+            return Err(ModVerificationError::MinecraftVersionMismatch {
+                expected: minecraft_version.clone(),
+                actual: loaded_mod.minecraft_versions,
+            });
         }
         // Verify that all dependencies are specified.
         let mut missing_deps = Vec::new();
