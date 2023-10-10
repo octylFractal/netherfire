@@ -3,7 +3,10 @@ netherfire
 
 A Minecraft modpack automation tool. Takes a modpack configuration and spits out a working modpack.
 
-Supports CurseForge, Modrinth, and arbitrary override directories for common, client, and server.
+## Support
+Supported inputs are CurseForge, Modrinth, and arbitrary override directories for common, client, and server.
+
+Supported outputs are CurseForge modpacks, Modrinth modpacks, or a server directory.
 
 ## How to Use
 
@@ -45,6 +48,10 @@ jei = { project = 238222, version = 4712867, side = "client" }
 fabric-api = { project = "P7dR8mSH", version = "tFw0iWAk" }
 jei = { project = "u6dRKJwZ", version = "lIRFslED", side = "client" }
 ```
+
+Optionally, also add files to `overrides/`, `client-overrides/`, and `server-overrides/` to include any files you want
+in the distributions directly. If you want mods not from CurseForge or Modrinth, you can also add them to a `mods/`
+directory in any of the override directories.
 
 Next, run `netherfire <source directory>`. This verifies that the configuration loads and is valid.
 
