@@ -11,9 +11,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::config::mods::{Mod, ModSide};
-use crate::mod_site::{
-    CurseForge, ModDownloadError, ModId, ModIdValue, ModLoadingError, ModSite, Modrinth,
-};
+use crate::mod_site::{CurseForge, ModDownloadError, ModId, ModIdValue, ModLoadingError, ModSite, Modrinth, ModHash};
 use crate::progress::{steady_tick_duration, style_bar};
 use crate::ModConfig;
 
@@ -134,20 +132,18 @@ where
         progress_bar.enable_steady_tick(steady_tick_duration());
         let file_meta = site.load_file(mod_id.clone()).await?;
         let dest_file = dest_dir.join(&file_meta.filename);
-        if let Some(hash) = file_meta.hash {
-            if dest_file.exists() {
-                // Check if we already have the file.
-                let content = tokio::fs::read(&dest_file).await?;
-                if hash.check(&content) {
-                    progress_bar.disable_steady_tick();
-                    progress_bar.finish_with_message(format!(
-                        "[{}] Found cached {}",
-                        S::NAME,
-                        file_meta.filename
-                    ));
-                    multi.remove(&progress_bar);
-                    return Ok(dest_file);
-                }
+        if dest_file.exists() {
+            // Check if we already have the file.
+            let content = tokio::fs::read(&dest_file).await?;
+            if file_meta.hash.check_hash_if_possible(&content).is_some_and(|valid| valid) {
+                progress_bar.disable_steady_tick();
+                progress_bar.finish_with_message(format!(
+                    "[{}] Found cached {}",
+                    S::NAME,
+                    file_meta.filename
+                ));
+                multi.remove(&progress_bar);
+                return Ok(dest_file);
             }
         }
 

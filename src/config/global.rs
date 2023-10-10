@@ -23,7 +23,9 @@ pub static FERINTH: Lazy<Ferinth> = Lazy::new(|| {
         env!("CARGO_CRATE_NAME"),
         Some(env!("CARGO_PKG_VERSION")),
         Some("Octavia Togami"),
+        None,
     )
+    .expect("Failed to initialise Ferinth")
 });
 
 #[derive(Debug, Clone, Deserialize)]

@@ -11,7 +11,8 @@ use crate::checks::verify_mods::{verify_mods, ModsVerificationError};
 use crate::config::mods::ModConfig;
 use crate::config::pack::PackConfig;
 use crate::output::{
-    create_curseforge_zip, create_server_base, CreateCurseForgeZipError, CreateServerBaseError,
+    create_curseforge_zip, create_modrinth_pack, create_server_base, CreateCurseForgeZipError,
+    CreateModrinthPackError, CreateServerBaseError,
 };
 
 mod checks;
@@ -24,11 +25,10 @@ mod progress;
 ///
 /// General layout of a `netherfire` modpack source directory:
 /// - `config.toml` file for general configuration (mod loader, MC version, etc.)
-/// - `mods.toml` file for CurseForge-based mods
-/// - `mods/` directory for manual mod additions
-/// - `overrides/` directory for anything that should be added to the base game folder
-/// - `_CLIENT/` directory for client-only `mods/` and `overrides/`
-/// - `_SERVER/` directory for server-only `mods/` and `overrides/`
+/// - `mods.toml` file for CurseForge or Modrinth mods
+/// - `overrides/` directory for anything that should be added to the base game folder (put other `mods/` here!)
+/// - `client-overrides/` directory for client-only `overrides/`
+/// - `server-overrides/` directory for server-only `overrides/`
 #[derive(Parser)]
 #[clap(verbatim_doc_comment)]
 pub struct Netherfire {
@@ -38,12 +38,16 @@ pub struct Netherfire {
     /// The path should be a directory, the ZIP will be written under it.
     #[clap(long)]
     pub create_curseforge_zip: Option<PathBuf>,
+    /// Write a Modrinth `.mrpack` to the given path.
+    /// The path should be a directory, the pack will be written under it.
+    #[clap(long)]
+    pub create_modrinth_pack: Option<PathBuf>,
     /// Produce a server base folder by downloading mods if needed.
     #[clap(long)]
     pub create_server_base: Option<PathBuf>,
     /// Verbosity level, repeat to increase.
-    #[clap(short, long, parse(from_occurrences))]
-    pub verbose: usize,
+    #[clap(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 #[derive(Debug, Error)]
@@ -56,6 +60,8 @@ enum NetherfireError {
     ModVerification(#[from] ModsVerificationError),
     #[error("Create CurseForge ZIP error: {0}")]
     CreateCurseForgeZip(#[from] CreateCurseForgeZipError),
+    #[error("Create Modrinth Pack error: {0}")]
+    CreateModrinthPack(#[from] CreateModrinthPackError),
     #[error("Create server base error: {0}")]
     CreateServerBase(#[from] CreateServerBaseError),
 }
@@ -112,6 +118,10 @@ async fn main_for_result(args: Netherfire) -> Result<(), NetherfireError> {
 
     if let Some(cf_zip) = args.create_curseforge_zip {
         create_curseforge_zip(&pack_config, &mod_config, &args.source, cf_zip).await?;
+    }
+
+    if let Some(mrpack) = args.create_modrinth_pack {
+        create_modrinth_pack(&pack_config, &mod_config, &args.source, mrpack).await?;
     }
 
     if let Some(server_base_dir) = args.create_server_base {

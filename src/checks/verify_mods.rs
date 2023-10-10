@@ -91,6 +91,7 @@ fn submit_verify_site<S>(
 ) -> JoinHandle<HashMap<String, ModVerificationError>>
 where
     S: ModSite,
+    S::ModHash: Clone + Send + Sync + 'static,
 {
     let multi = multi.clone();
     let mods = mods.clone();
@@ -110,7 +111,8 @@ async fn verify_mods_site<K, S>(
     site: S,
 ) where
     K: ModIdValue,
-    S: ModSite<Id = K> + Clone + Send + Sync + 'static,
+    S: ModSite<Id = K>,
+    S::ModHash: Clone + Send + Sync + 'static,
 {
     let mut mods_by_project_id = HashSet::with_capacity(mods.len());
     let mut mods_by_version_id = HashSet::with_capacity(mods.len());
@@ -173,12 +175,12 @@ async fn verify_mods_site<K, S>(
     }
 }
 
-async fn verify_mod<K, S>(
+async fn verify_mod<K, H, S>(
     minecraft_version: &String,
     mods_by_project_id: &HashSet<K>,
     mods_by_version_id: &HashSet<K>,
     cfg_id: &str,
-    loaded_mod: ModFileInfo<K>,
+    loaded_mod: ModFileInfo<K, H>,
     site: &S,
 ) -> Result<(), ModVerificationError>
 where
@@ -275,13 +277,14 @@ where
     }
 }
 
-fn submit_load<K>(
+fn submit_load<K, H>(
     progress_bar: ProgressBar,
     mod_id: ModId<K>,
-    site: impl ModSite<Id = K>,
-) -> JoinHandle<ModFileLoadingResult<K>>
+    site: impl ModSite<Id = K, ModHash = H>,
+) -> JoinHandle<ModFileLoadingResult<K, H>>
 where
     K: ModIdValue,
+    H: Send + Sync + 'static,
 {
     static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(30));
 

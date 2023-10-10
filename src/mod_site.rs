@@ -1,9 +1,9 @@
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 use std::pin::Pin;
 
 use digest::Digest;
-use ferinth::structures::project_structs::ProjectType;
-use ferinth::structures::version_structs::DependencyType;
+use ferinth::structures::project::ProjectType;
+use ferinth::structures::version::DependencyType;
 use furse::structures::file_structs::{FileRelationType, HashAlgo};
 use futures::TryStreamExt;
 use reqwest::Url;
@@ -18,6 +18,12 @@ pub trait ModIdValue: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'stat
 
 impl<T> ModIdValue for T where T: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {}
 
+pub trait ModHash: Clone + Send + Sync + 'static {
+    /// Use the strongest available hash to check the content, if possible.
+    /// Returns `None` if no hash is available.
+    fn check_hash_if_possible(&self, content: &[u8]) -> Option<bool>;
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Deserialize)]
 pub struct ModId<K: ModIdValue> {
     pub project_id: K,
@@ -30,11 +36,14 @@ pub trait ModSite: Copy + Clone + Send + Sync + 'static {
 
     type Id: ModIdValue;
 
+    type ModHash: ModHash;
+
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult;
 
     async fn load_metadata_by_version(&self, version_id: Self::Id) -> Option<ModLoadingResult>;
 
-    async fn load_file(&self, id: ModId<Self::Id>) -> ModFileLoadingResult<Self::Id>;
+    async fn load_file(&self, id: ModId<Self::Id>)
+        -> ModFileLoadingResult<Self::Id, Self::ModHash>;
 
     async fn download(&self, id: ModId<Self::Id>) -> ModDownloadResult;
 }
@@ -47,6 +56,8 @@ impl ModSite for CurseForge {
     const NAME: &'static str = "CurseForge";
 
     type Id = i32;
+
+    type ModHash = CFHash;
 
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult {
         let furse_mod = FURSE.get_mod(project_id).await?;
@@ -61,7 +72,10 @@ impl ModSite for CurseForge {
         None
     }
 
-    async fn load_file(&self, id: ModId<Self::Id>) -> ModFileLoadingResult<Self::Id> {
+    async fn load_file(
+        &self,
+        id: ModId<Self::Id>,
+    ) -> ModFileLoadingResult<Self::Id, Self::ModHash> {
         let project_info = self.load_metadata(id.project_id).await?;
         let file = FURSE.get_mod_file(id.project_id, id.version_id).await?;
 
@@ -69,15 +83,16 @@ impl ModSite for CurseForge {
         let mut md5 = None;
         for hash in file.hashes {
             if hash.algo == HashAlgo::Sha1 {
-                sha1 = Some(hash.value);
+                sha1 = hex_to_hash_output::<sha1::Sha1>(&hash.value);
             } else if hash.algo == HashAlgo::Md5 {
-                md5 = Some(hash.value);
+                md5 = hex_to_hash_output::<md5::Md5>(&hash.value);
             }
         }
 
         Ok(ModFileInfo {
             project_info,
             filename: file.file_name,
+            url: file.download_url.expect("verified earlier").to_string(),
             file_length: file.file_length as u64,
             minecraft_versions: file.game_versions,
             dependencies: file
@@ -92,17 +107,7 @@ impl ModSite for CurseForge {
                     },
                 })
                 .collect(),
-            hash: sha1
-                .map(|v| Hash {
-                    algo: HashAlgorithm::Sha1,
-                    value: v,
-                })
-                .or_else(|| {
-                    md5.map(|v| Hash {
-                        algo: HashAlgorithm::Md5,
-                        value: v,
-                    })
-                }),
+            hash: CFHash { sha1, md5 },
         })
     }
 
@@ -114,6 +119,24 @@ impl ModSite for CurseForge {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CFHash {
+    pub sha1: Option<digest::Output<sha1::Sha1>>,
+    pub md5: Option<digest::Output<md5::Md5>>,
+}
+
+impl ModHash for CFHash {
+    fn check_hash_if_possible(&self, content: &[u8]) -> Option<bool> {
+        if let Some(sha1) = self.sha1 {
+            return Some(check_hash::<sha1::Sha1>(&sha1, content));
+        }
+        if let Some(md5) = self.md5 {
+            return Some(check_hash::<md5::Md5>(&md5, content));
+        }
+        None
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct Modrinth;
 
@@ -122,6 +145,8 @@ impl ModSite for Modrinth {
     const NAME: &'static str = "Modrinth";
 
     type Id = String;
+
+    type ModHash = ModrinthHash;
 
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult {
         let ferinth_mod = FERINTH.get_project(&project_id).await?;
@@ -144,7 +169,10 @@ impl ModSite for Modrinth {
         Some(self.load_metadata(version_info.project_id).await)
     }
 
-    async fn load_file(&self, id: ModId<Self::Id>) -> ModFileLoadingResult<Self::Id> {
+    async fn load_file(
+        &self,
+        id: ModId<Self::Id>,
+    ) -> ModFileLoadingResult<Self::Id, Self::ModHash> {
         let project_info = self.load_metadata(id.project_id).await?;
         let version = FERINTH.get_version(&id.version_id).await?;
         let file_meta = version
@@ -177,13 +205,16 @@ impl ModSite for Modrinth {
         Ok(ModFileInfo {
             project_info,
             filename: file_meta.filename,
+            url: file_meta.url.to_string(),
             file_length: file_meta.size as u64,
             minecraft_versions: version.game_versions,
             dependencies,
-            hash: Some(Hash {
-                algo: HashAlgorithm::Sha512,
-                value: file_meta.hashes.sha512,
-            }),
+            hash: ModrinthHash {
+                sha1: hex_to_hash_output::<sha1::Sha1>(&file_meta.hashes.sha1)
+                    .expect("invalid sha1 hash"),
+                sha512: hex_to_hash_output::<sha2::Sha512>(&file_meta.hashes.sha512)
+                    .expect("invalid sha512 hash"),
+            },
         })
     }
 
@@ -210,6 +241,18 @@ async fn reqwest_async_read(url: Url) -> Result<BoxAsyncRead, ModDownloadError> 
     ))
 }
 
+#[derive(Debug, Clone)]
+pub struct ModrinthHash {
+    pub sha1: digest::Output<sha1::Sha1>,
+    pub sha512: digest::Output<sha2::Sha512>,
+}
+
+impl ModHash for ModrinthHash {
+    fn check_hash_if_possible(&self, content: &[u8]) -> Option<bool> {
+        Some(check_hash::<sha2::Sha512>(&self.sha512, content))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ModLoadingError {
     #[error("The project exists, but is not a mod")]
@@ -233,55 +276,35 @@ pub enum ModDownloadError {
 }
 
 pub type ModLoadingResult = Result<ModInfo, ModLoadingError>;
-pub type ModFileLoadingResult<K> = Result<ModFileInfo<K>, ModLoadingError>;
+pub type ModFileLoadingResult<K, H> = Result<ModFileInfo<K, H>, ModLoadingError>;
 
 #[derive(Debug, Clone)]
-pub struct ModFileInfo<K> {
+pub struct ModFileInfo<K, H> {
     pub project_info: ModInfo,
     pub filename: String,
+    pub url: String,
     pub file_length: u64,
     pub minecraft_versions: Vec<String>,
     pub dependencies: Vec<ModDependency<K>>,
-    pub hash: Option<Hash>,
+    pub hash: H,
 }
 
-#[derive(Debug, Clone)]
-pub struct Hash {
-    pub algo: HashAlgorithm,
-    pub value: String,
+/// Tries to convert a hex representation of a hash into a hash output.
+/// Returns `None` if the hex string is invalid.
+pub fn hex_to_hash_output<D: Digest>(s: &str) -> Option<digest::Output<D>> {
+    let mut array = digest::Output::<D>::default();
+    hex::decode_to_slice(s, &mut array)
+        .map_err(|e| {
+            log::debug!("invalid hex string: {}", e);
+        })
+        .ok()?;
+    Some(array)
 }
 
-impl Hash {
-    pub fn check(&self, content: &[u8]) -> bool {
-        let expected_hash = hex::decode(&self.value)
-            .unwrap_or_else(|e| panic!("hash ({}) problem: {}", &self.value, e));
-        (match self.algo {
-            HashAlgorithm::Md5 => md5::Md5::digest(content).to_vec(),
-            HashAlgorithm::Sha1 => sha1::Sha1::digest(content).to_vec(),
-            HashAlgorithm::Sha512 => sha2::Sha512::digest(content).to_vec(),
-        }) == expected_hash
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum HashAlgorithm {
-    Md5,
-    Sha1,
-    Sha512,
-}
-
-impl Display for HashAlgorithm {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                HashAlgorithm::Md5 => "md5",
-                HashAlgorithm::Sha1 => "sha1",
-                HashAlgorithm::Sha512 => "sha512",
-            }
-        )
-    }
+pub fn check_hash<D: Digest + Default>(value: &digest::Output<D>, content: &[u8]) -> bool {
+    let mut hasher = D::default();
+    hasher.update(content);
+    &hasher.finalize() == value
 }
 
 #[derive(Debug, Clone)]
