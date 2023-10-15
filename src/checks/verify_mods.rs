@@ -210,8 +210,9 @@ where
                 .await?
                 {
                     log::info!(
-                        "[{}] [FYI] Missing optional dependency for {}: {} (ID: {:?})",
+                        "[{}] [{}] Missing optional dependency for {}: {} (ID: {:?})",
                         S::NAME.errstyle(SITE_NAME_STYLE),
+                        "FYI".errstyle(|s| s.bold().yellow()),
                         cfg_id.errstyle(CONFIG_VAL_STYLE),
                         v.errstyle(SITE_VAL_STYLE),
                         dep.id.errstyle(CONFIG_VAL_STYLE),
