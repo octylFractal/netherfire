@@ -19,8 +19,8 @@ use crate::output::curseforge_manifest::{
 };
 use crate::output::mod_download::{download_mods, ModsDownloadError};
 use crate::output::modrinth_manifest::ModrinthManifest;
-use crate::PackConfig;
 use crate::uwu_colors::{ErrStyle, FILE_STYLE, SITE_NAME_STYLE};
+use crate::PackConfig;
 
 mod curseforge_manifest;
 mod mod_download;
@@ -65,7 +65,10 @@ pub async fn create_curseforge_zip(
 
     let zip = ZipWriter::new(std::fs::File::create(&output_file)?);
 
-    log::info!("Downloading {} mods...", "Modrinth".errstyle(SITE_NAME_STYLE));
+    log::info!(
+        "Downloading {} mods...",
+        "Modrinth".errstyle(SITE_NAME_STYLE)
+    );
 
     let zip_arc = Arc::new(Mutex::new(zip));
     let mut zip_dl_tasks = Vec::with_capacity(pack.mods.modrinth.len());
@@ -175,7 +178,10 @@ pub async fn create_modrinth_pack(
 
     std::fs::create_dir_all(&output_dir)?;
 
-    log::info!("Fetching {} metadata...", "Modrinth".errstyle(SITE_NAME_STYLE));
+    log::info!(
+        "Fetching {} metadata...",
+        "Modrinth".errstyle(SITE_NAME_STYLE)
+    );
     let mut modrinth_files = Vec::with_capacity(pack.mods.modrinth.len());
     for (cfg_id, mod_) in &pack.mods.modrinth {
         let mod_info = Modrinth
@@ -205,7 +211,10 @@ pub async fn create_modrinth_pack(
         });
     }
 
-    log::info!("Downloading {} mods...", "CurseForge".errstyle(SITE_NAME_STYLE));
+    log::info!(
+        "Downloading {} mods...",
+        "CurseForge".errstyle(SITE_NAME_STYLE)
+    );
 
     let zip = ZipWriter::new(std::fs::File::create(&output_file)?);
 
@@ -337,7 +346,7 @@ pub async fn create_server_base(
         CreateServerBaseError::CloneDir,
     )?;
 
-    download_mods(pack,&mods_folder, |side| side.on_server()).await?;
+    download_mods(pack, &mods_folder, |side| side.on_server()).await?;
 
     log::info!(
         "Created server base at '{}'.",

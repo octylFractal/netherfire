@@ -177,7 +177,9 @@ impl ModSite for Modrinth {
     ) -> ModFileLoadingResult<Self::Id, Self::ModHash> {
         let project_info = self.load_metadata(id.project_id).await?;
         let version = ferinth_with_retry(|| FERINTH.get_version(&id.version_id)).await?;
-        let file_meta = version.files.into_iter()
+        let file_meta = version
+            .files
+            .into_iter()
             .find_or_first(|f| f.primary)
             .ok_or(ModLoadingError::NoFiles)?;
 

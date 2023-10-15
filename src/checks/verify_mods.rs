@@ -31,6 +31,8 @@ pub enum ModVerificationError {
         expected: String,
         actual: Vec<String>,
     },
+    #[error("Error loading dependency {0}: {1}")]
+    DependencyLoading(String, #[source] ModLoadingError),
 }
 
 #[derive(Debug)]
@@ -189,34 +191,53 @@ where
     for dep in loaded_mod.dependencies {
         match dep.kind {
             ModDependencyKind::Required => {
-                if let Some(v) = get_dep_name_if_missing(
+                match get_dep_name_if_missing(
                     site,
                     dep.id.clone(),
                     mods_by_project_id,
                     mods_by_version_id,
                 )
-                .await?
+                .await
                 {
-                    missing_deps.push(format!("{} ({:?})", v, dep.id));
+                    Ok(Some(v)) => missing_deps.push(format!("{} ({:?})", v, dep.id)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(ModVerificationError::DependencyLoading(
+                            format!("{:?}", dep.id),
+                            e,
+                        ));
+                    }
                 }
             }
             ModDependencyKind::Optional => {
-                if let Some(v) = get_dep_name_if_missing(
+                match get_dep_name_if_missing(
                     site,
                     dep.id.clone(),
                     mods_by_project_id,
                     mods_by_version_id,
                 )
-                .await?
+                .await
                 {
-                    log::info!(
-                        "[{}] [{}] Missing optional dependency for {}: {} (ID: {:?})",
-                        S::NAME.errstyle(SITE_NAME_STYLE),
-                        "FYI".errstyle(|s| s.bold().yellow()),
-                        cfg_id.errstyle(CONFIG_VAL_STYLE),
-                        v.errstyle(SITE_VAL_STYLE),
-                        dep.id.errstyle(CONFIG_VAL_STYLE),
-                    );
+                    Ok(Some(v)) => {
+                        log::info!(
+                            "[{}] [{}] Missing optional dependency for {}: {} (ID: {:?})",
+                            S::NAME.errstyle(SITE_NAME_STYLE),
+                            "FYI".errstyle(|s| s.bold().yellow()),
+                            cfg_id.errstyle(CONFIG_VAL_STYLE),
+                            v.errstyle(SITE_VAL_STYLE),
+                            dep.id.errstyle(CONFIG_VAL_STYLE),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "[{}] Error loading optional dependency for {}, dependency ID = {:?}: {}",
+                            S::NAME.errstyle(SITE_NAME_STYLE),
+                            cfg_id.errstyle(CONFIG_VAL_STYLE),
+                            dep.id.errstyle(CONFIG_VAL_STYLE),
+                            e,
+                        );
+                    }
                 }
             }
             _ => {}
@@ -236,7 +257,7 @@ async fn get_dep_name_if_missing<K, S>(
     id: DependencyId<K>,
     mods_by_project_id: &HashSet<K>,
     mods_by_version_id: &HashSet<K>,
-) -> Result<Option<String>, ModVerificationError>
+) -> Result<Option<String>, ModLoadingError>
 where
     K: ModIdValue,
     S: ModSite<Id = K>,
@@ -244,10 +265,7 @@ where
     match id {
         DependencyId::Project(project_id) => {
             if !(mods_by_project_id.contains(&project_id)) {
-                site.load_metadata(project_id)
-                    .await
-                    .map(|v| Some(v.name))
-                    .map_err(Into::into)
+                site.load_metadata(project_id).await.map(|v| Some(v.name))
             } else {
                 Ok(None)
             }
@@ -257,7 +275,6 @@ where
                 site.load_metadata_by_version(version_id).await
                     .expect("sites that provide only a version in dependencies must allow lookup by version")
                     .map(|v| Some(v.name))
-                    .map_err(Into::into)
             } else {
                 Ok(None)
             }

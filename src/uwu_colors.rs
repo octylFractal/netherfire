@@ -22,4 +22,3 @@ pub static SITE_VAL_STYLE: fn(Style) -> Style = Style::blue;
 pub static CONFIG_VAL_STYLE: fn(Style) -> Style = Style::purple;
 pub static FILE_STYLE: fn(Style) -> Style = Style::cyan;
 pub static SUCCESS_STYLE: fn(Style) -> Style = Style::green;
-

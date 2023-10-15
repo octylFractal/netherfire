@@ -94,9 +94,9 @@ async fn main() -> ExitCode {
             if verbosity > 0 {
                 // Include the location of the log message if verbose.
                 if let Some(p) = record.module_path() {
-                    write!(buf, "[{}]", p)?;
+                    write!(buf, "[{}] ", p)?;
                 } else {
-                    write!(buf, "[unknown]")?;
+                    write!(buf, "[unknown] ")?;
                 }
             }
 
