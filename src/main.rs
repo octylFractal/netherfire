@@ -1,14 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::process::Termination;
 
 use clap::Parser;
 use log::LevelFilter;
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::checks::verify_mods::{verify_mods, ModsVerificationError};
-use crate::config::mods::ModConfig;
 use crate::config::pack::PackConfig;
 use crate::output::{
     create_curseforge_zip, create_modrinth_pack, create_server_base, CreateCurseForgeZipError,
@@ -19,7 +18,7 @@ mod checks;
 mod config;
 mod mod_site;
 mod output;
-mod progress;
+mod uwu_colors;
 
 /// Handles files for a Minecraft modpack.
 ///
@@ -46,16 +45,14 @@ pub struct Netherfire {
     #[clap(long)]
     pub create_server_base: Option<PathBuf>,
     /// Verbosity level, repeat to increase.
-    #[clap(short, long, action = clap::ArgAction::Count)]
-    pub verbose: u8,
+    #[clap(short, action = clap::ArgAction::Count)]
+    pub verbosity: u8,
 }
 
 #[derive(Debug, Error)]
 enum NetherfireError {
     #[error("Modpack configuration load error: {0}")]
-    PackConfigLoad(#[from] PackConfigLoadError),
-    #[error("Mod configuration load error: {0}")]
-    ModConfigLoad(#[from] ModConfigLoadError),
+    PackConfigLoad(#[from] ConfigLoadError),
     #[error("Mod verification errors: {0}")]
     ModVerification(#[from] ModsVerificationError),
     #[error("Create CurseForge ZIP error: {0}")]
@@ -67,16 +64,8 @@ enum NetherfireError {
 }
 
 #[derive(Debug, Error)]
-enum PackConfigLoadError {
-    #[error("I/O Error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("TOML Parse Error: {0}")]
-    TomlParse(#[from] toml::de::Error),
-}
-
-#[derive(Debug, Error)]
-enum ModConfigLoadError {
-    #[error("I/O Error: {0}")]
+enum ConfigLoadError {
+    #[error("I/O Error on config.toml: {0}")]
     Io(#[from] std::io::Error),
     #[error("TOML Parse Error: {0}")]
     TomlParse(#[from] toml::de::Error),
@@ -92,11 +81,26 @@ impl Termination for NetherfireError {
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Netherfire = Netherfire::parse();
+    let verbosity = args.verbosity;
     env_logger::Builder::new()
-        .filter_level(match args.verbose {
+        .filter_level(match verbosity {
             0 => LevelFilter::Info,
             1 => LevelFilter::Debug,
             _ => LevelFilter::Trace,
+        })
+        .format(move |buf, record| {
+            write!(buf, "[{}] ", buf.default_styled_level(record.level()))?;
+
+            if verbosity > 0 {
+                // Include the location of the log message if verbose.
+                if let Some(p) = record.module_path() {
+                    write!(buf, "[{}]", p)?;
+                } else {
+                    write!(buf, "[unknown]")?;
+                }
+            }
+
+            writeln!(buf, "{}", record.args())
         })
         .init();
 
@@ -110,33 +114,23 @@ async fn main() -> ExitCode {
 }
 
 async fn main_for_result(args: Netherfire) -> Result<(), NetherfireError> {
-    let pack_config =
-        toml_load::<_, PackConfig, PackConfigLoadError>(args.source.join("config.toml"))?;
-    let mod_config = toml_load::<_, ModConfig, ModConfigLoadError>(args.source.join("mods.toml"))?;
+    let path = args.source.join("config.toml");
+    let s = std::fs::read_to_string(path).map_err(ConfigLoadError::from)?;
+    let pack_config = toml::from_str::<PackConfig>(&s).map_err(ConfigLoadError::from)?;
 
-    verify_mods(&mod_config, &pack_config.minecraft_version).await?;
+    verify_mods(&pack_config).await?;
 
     if let Some(cf_zip) = args.create_curseforge_zip {
-        create_curseforge_zip(&pack_config, &mod_config, &args.source, cf_zip).await?;
+        create_curseforge_zip(&pack_config, &args.source, cf_zip).await?;
     }
 
     if let Some(mrpack) = args.create_modrinth_pack {
-        create_modrinth_pack(&pack_config, &mod_config, &args.source, mrpack).await?;
+        create_modrinth_pack(&pack_config, &args.source, mrpack).await?;
     }
 
     if let Some(server_base_dir) = args.create_server_base {
-        create_server_base(&mod_config, &args.source, server_base_dir).await?;
+        create_server_base(&pack_config, &args.source, server_base_dir).await?;
     }
 
     Ok(())
-}
-
-fn toml_load<P, C, E>(path: P) -> Result<C, E>
-where
-    P: AsRef<Path>,
-    C: DeserializeOwned,
-    E: From<std::io::Error> + From<toml::de::Error>,
-{
-    let s = std::fs::read_to_string(path)?;
-    toml::from_str::<C>(&s).map_err(Into::into)
 }

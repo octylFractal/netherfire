@@ -32,7 +32,7 @@ use
 a `String` project and version ID. Do not use the slug for Modrinth mods, as it is subject to change and will introduce
 errors.
 
-Each section contains a set of mappings from an arbitrary identifier to the `project` ID, `version` ID, and optionally
+Each section contains a set of mappings from an arbitrary identifier to the `project_id`, `version_id`, and optionally
 a `side` (either `client` or `server`). If a mod includes bad dependency information, you can also exclude the bad
 dependency via `ignored_dependencies`.
 
@@ -41,12 +41,12 @@ and Modrinth:
 
 ```toml
 [mods.curseforge]
-fabric-api = { project = 306612, version = 4787692 }
-jei = { project = 238222, version = 4712867, side = "client" }
+fabric-api = { project_id = 306612, version_id = 4787692 }
+jei = { project_id = 238222, version_id = 4712867, side = "client" }
 
 [mods.modrinth]
-fabric-api = { project = "P7dR8mSH", version = "tFw0iWAk" }
-jei = { project = "u6dRKJwZ", version = "lIRFslED", side = "client" }
+fabric-api = { project_id = "P7dR8mSH", version_id = "tFw0iWAk" }
+jei = { project_id = "u6dRKJwZ", version_id = "lIRFslED", side = "client" }
 ```
 
 Optionally, also add files to `overrides/`, `client-overrides/`, and `server-overrides/` to include any files you want

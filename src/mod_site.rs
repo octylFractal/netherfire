@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::future::Future;
 use std::pin::Pin;
 
 use digest::Digest;
@@ -6,6 +7,7 @@ use ferinth::structures::project::ProjectType;
 use ferinth::structures::version::DependencyType;
 use furse::structures::file_structs::{FileRelationType, HashAlgo};
 use futures::TryStreamExt;
+use itertools::Itertools;
 use reqwest::Url;
 use serde::Deserialize;
 use thiserror::Error;
@@ -149,7 +151,7 @@ impl ModSite for Modrinth {
     type ModHash = ModrinthHash;
 
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult {
-        let ferinth_mod = FERINTH.get_project(&project_id).await?;
+        let ferinth_mod = ferinth_with_retry(|| FERINTH.get_project(&project_id)).await?;
         if ferinth_mod.project_type != ProjectType::Mod {
             return Err(ModLoadingError::NotAMod);
         }
@@ -161,7 +163,7 @@ impl ModSite for Modrinth {
     }
 
     async fn load_metadata_by_version(&self, version_id: Self::Id) -> Option<ModLoadingResult> {
-        let version_info = match FERINTH.get_version(&version_id).await {
+        let version_info = match ferinth_with_retry(|| FERINTH.get_version(&version_id)).await {
             Ok(v) => v,
             Err(e) => return Some(Err(e.into())),
         };
@@ -174,12 +176,10 @@ impl ModSite for Modrinth {
         id: ModId<Self::Id>,
     ) -> ModFileLoadingResult<Self::Id, Self::ModHash> {
         let project_info = self.load_metadata(id.project_id).await?;
-        let version = FERINTH.get_version(&id.version_id).await?;
-        let file_meta = version
-            .files
-            .into_iter()
-            .find(|f| f.primary)
-            .expect("no primary file");
+        let version = ferinth_with_retry(|| FERINTH.get_version(&id.version_id)).await?;
+        let file_meta = version.files.into_iter()
+            .find_or_first(|f| f.primary)
+            .ok_or(ModLoadingError::NoFiles)?;
 
         let dependencies = version
             .dependencies
@@ -219,8 +219,7 @@ impl ModSite for Modrinth {
     }
 
     async fn download(&self, id: ModId<Self::Id>) -> ModDownloadResult {
-        let file_meta = FERINTH
-            .get_version(&id.version_id)
+        let file_meta = ferinth_with_retry(|| FERINTH.get_version(&id.version_id))
             .await?
             .files
             .into_iter()
@@ -241,6 +240,27 @@ async fn reqwest_async_read(url: Url) -> Result<BoxAsyncRead, ModDownloadError> 
     ))
 }
 
+async fn ferinth_with_retry<T, Fut>(request: impl Fn() -> Fut) -> ferinth::Result<T>
+where
+    Fut: Future<Output = ferinth::Result<T>>,
+{
+    let mut retries = 0;
+    loop {
+        match request().await {
+            Ok(v) => return Ok(v),
+            Err(ferinth::Error::RateLimitExceeded(delay_sec)) => {
+                if retries >= 5 {
+                    return Err(ferinth::Error::RateLimitExceeded(delay_sec));
+                }
+                log::warn!("Retrying request due to rate limit");
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_sec as u64)).await;
+                retries += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModrinthHash {
     pub sha1: digest::Output<sha1::Sha1>,
@@ -257,6 +277,8 @@ impl ModHash for ModrinthHash {
 pub enum ModLoadingError {
     #[error("The project exists, but is not a mod")]
     NotAMod,
+    #[error("The project and version exist, but they have no files")]
+    NoFiles,
     #[error("CurseForge Error: {0}")]
     Furse(#[from] furse::Error),
     #[error("Modrinth Error: {0}")]

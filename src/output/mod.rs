@@ -3,7 +3,6 @@ use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use reflink::reflink_or_copy;
 use thiserror::Error;
@@ -20,8 +19,8 @@ use crate::output::curseforge_manifest::{
 };
 use crate::output::mod_download::{download_mods, ModsDownloadError};
 use crate::output::modrinth_manifest::ModrinthManifest;
-use crate::progress::{steady_tick_duration, style_bar};
-use crate::{ModConfig, PackConfig};
+use crate::PackConfig;
+use crate::uwu_colors::{ErrStyle, FILE_STYLE, SITE_NAME_STYLE};
 
 mod curseforge_manifest;
 mod mod_download;
@@ -52,36 +51,28 @@ static ZIP_OPTIONS: Lazy<zip::write::FileOptions> = Lazy::new(|| {
 
 pub async fn create_curseforge_zip(
     pack: &PackConfig,
-    mods: &ModConfig,
     source_dir: &Path,
     output_dir: PathBuf,
 ) -> Result<(), CreateCurseForgeZipError> {
     let output_file = output_dir.join(format!("{} ({}).zip", pack.name, pack.version));
 
-    let multi = MultiProgress::new();
-    let action_pb = multi.add(ProgressBar::new_spinner().with_message(format!(
+    log::info!(
         "Creating CurseForge zip at '{}'...",
-        output_file.display()
-    )));
-    action_pb.enable_steady_tick(steady_tick_duration());
+        output_file.display().errstyle(FILE_STYLE)
+    );
 
     std::fs::create_dir_all(&output_dir)?;
 
     let zip = ZipWriter::new(std::fs::File::create(&output_file)?);
 
-    let progress_bar = multi.add(ProgressBar::new_spinner());
-    progress_bar.enable_steady_tick(steady_tick_duration());
-
-    progress_bar.set_message("Downloading Modrinth mods...");
-    progress_bar.set_length(mods.mods.modrinth.len() as u64);
+    log::info!("Downloading {} mods...", "Modrinth".errstyle(SITE_NAME_STYLE));
 
     let zip_arc = Arc::new(Mutex::new(zip));
-    let mut zip_dl_tasks = Vec::with_capacity(mods.mods.modrinth.len());
-    for (cfg_id, mod_) in &mods.mods.modrinth {
+    let mut zip_dl_tasks = Vec::with_capacity(pack.mods.modrinth.len());
+    for (cfg_id, mod_) in &pack.mods.modrinth {
         zip_dl_tasks.push((
             cfg_id,
             spawn(add_mod_to_zip(
-                multi.clone(),
                 Modrinth,
                 mod_.source.clone(),
                 Arc::clone(&zip_arc),
@@ -92,21 +83,19 @@ pub async fn create_curseforge_zip(
         task.await
             .expect("task panicked")
             .map_err(|e| CreateCurseForgeZipError::ZipMod(cfg_id.clone(), e))?;
-        progress_bar.inc(1);
     }
     let mut zip = Arc::into_inner(zip_arc)
         .expect("all zip tasks should be finished")
         .into_inner();
 
-    progress_bar.set_style(ProgressStyle::default_spinner());
-    progress_bar.set_message("Copying overrides...");
+    log::info!("Copying overrides...");
     zip_dir(
         source_dir.join(LIT_OVERRIDES),
         &mut zip,
         LIT_OVERRIDES,
         CreateCurseForgeZipError::ZipDir,
     )?;
-    progress_bar.set_message("Copying client-only overrides...");
+    log::info!("Copying client-only overrides...");
     zip_dir(
         source_dir.join(LIT_CLIENT_OVERRIDES),
         &mut zip,
@@ -114,7 +103,7 @@ pub async fn create_curseforge_zip(
         CreateCurseForgeZipError::ZipDir,
     )?;
 
-    progress_bar.set_message("Writing manifest...");
+    log::info!("Writing manifest...");
     let manifest = CurseForgeManifest {
         minecraft: Minecraft {
             version: pack.minecraft_version.clone(),
@@ -128,7 +117,7 @@ pub async fn create_curseforge_zip(
         name: pack.name.clone(),
         version: pack.version.clone(),
         author: pack.author.clone(),
-        files: mods
+        files: pack
             .mods
             .curseforge
             .values()
@@ -144,17 +133,14 @@ pub async fn create_curseforge_zip(
     zip.start_file("manifest.json", *ZIP_OPTIONS)?;
     serde_json::to_writer(&mut zip, &manifest)?;
 
-    progress_bar.set_message("Flushing zip...");
+    log::info!("Flushing zip...");
 
     zip.finish()?;
 
-    multi.remove(&progress_bar);
-
-    action_pb.disable_steady_tick();
-    action_pb.finish_with_message(format!(
+    log::info!(
         "Created CurseForge zip at '{}'.",
-        output_file.display()
-    ));
+        output_file.display().errstyle(FILE_STYLE)
+    );
 
     Ok(())
 }
@@ -177,28 +163,21 @@ pub enum CreateModrinthPackError {
 
 pub async fn create_modrinth_pack(
     pack: &PackConfig,
-    mods: &ModConfig,
     source_dir: &Path,
     output_dir: PathBuf,
 ) -> Result<(), CreateModrinthPackError> {
     let output_file = output_dir.join(format!("{} ({}).mrpack", pack.name, pack.version));
 
-    let multi = MultiProgress::new();
-    let action_pb = multi.add(ProgressBar::new_spinner().with_message(format!(
+    log::info!(
         "Creating Modrinth pack at '{}'...",
-        output_file.display()
-    )));
-    action_pb.enable_steady_tick(steady_tick_duration());
+        output_file.display().errstyle(FILE_STYLE)
+    );
 
     std::fs::create_dir_all(&output_dir)?;
 
-    let progress_bar = multi.add(ProgressBar::new_spinner());
-    progress_bar.enable_steady_tick(steady_tick_duration());
-
-    progress_bar.set_message("Fetching Modrinth metadata...");
-    progress_bar.set_length(mods.mods.modrinth.len() as u64);
-    let mut modrinth_files = Vec::with_capacity(mods.mods.modrinth.len());
-    for (cfg_id, mod_) in &mods.mods.modrinth {
+    log::info!("Fetching {} metadata...", "Modrinth".errstyle(SITE_NAME_STYLE));
+    let mut modrinth_files = Vec::with_capacity(pack.mods.modrinth.len());
+    for (cfg_id, mod_) in &pack.mods.modrinth {
         let mod_info = Modrinth
             .load_file(mod_.source.clone())
             .await
@@ -224,21 +203,18 @@ pub async fn create_modrinth_pack(
             downloads: vec![mod_info.url],
             file_size: mod_info.file_length,
         });
-        progress_bar.inc(1);
     }
 
-    progress_bar.set_message("Downloading CurseForge mods...");
-    progress_bar.set_length(mods.mods.curseforge.len() as u64);
+    log::info!("Downloading {} mods...", "CurseForge".errstyle(SITE_NAME_STYLE));
 
     let zip = ZipWriter::new(std::fs::File::create(&output_file)?);
 
     let zip_arc = Arc::new(Mutex::new(zip));
-    let mut zip_dl_tasks = Vec::with_capacity(mods.mods.curseforge.len());
-    for (cfg_id, mod_) in &mods.mods.curseforge {
+    let mut zip_dl_tasks = Vec::with_capacity(pack.mods.curseforge.len());
+    for (cfg_id, mod_) in &pack.mods.curseforge {
         zip_dl_tasks.push((
             cfg_id,
             spawn(add_mod_to_zip(
-                multi.clone(),
                 CurseForge,
                 mod_.source,
                 Arc::clone(&zip_arc),
@@ -249,28 +225,26 @@ pub async fn create_modrinth_pack(
         task.await
             .expect("task panicked")
             .map_err(|e| CreateModrinthPackError::ZipMod(cfg_id.clone(), e))?;
-        progress_bar.inc(1);
     }
     let mut zip = Arc::into_inner(zip_arc)
         .expect("all zip tasks should be finished")
         .into_inner();
 
-    progress_bar.set_style(ProgressStyle::default_spinner());
-    progress_bar.set_message("Copying overrides...");
+    log::info!("Copying overrides...");
     zip_dir(
         source_dir.join(LIT_OVERRIDES),
         &mut zip,
         LIT_OVERRIDES,
         CreateModrinthPackError::ZipDir,
     )?;
-    progress_bar.set_message("Copying client-only overrides...");
+    log::info!("Copying client-only overrides...");
     zip_dir(
         source_dir.join(LIT_CLIENT_OVERRIDES),
         &mut zip,
         LIT_CLIENT_OVERRIDES,
         CreateModrinthPackError::ZipDir,
     )?;
-    progress_bar.set_message("Copying server-only overrides...");
+    log::info!("Copying server-only overrides...");
     zip_dir(
         source_dir.join(LIT_SERVER_OVERRIDES),
         &mut zip,
@@ -278,7 +252,7 @@ pub async fn create_modrinth_pack(
         CreateModrinthPackError::ZipDir,
     )?;
 
-    progress_bar.set_message("Writing manifest...");
+    log::info!("Writing manifest...");
 
     let forge =
         (pack.mod_loader.id == ModLoaderType::Forge).then(|| pack.mod_loader.version.clone());
@@ -307,17 +281,14 @@ pub async fn create_modrinth_pack(
     zip.start_file("modrinth.index.json", *ZIP_OPTIONS)?;
     serde_json::to_writer(&mut zip, &manifest)?;
 
-    progress_bar.set_message("Flushing zip...");
+    log::info!("Flushing zip...");
 
     zip.finish()?;
 
-    multi.remove(&progress_bar);
-
-    action_pb.disable_steady_tick();
-    action_pb.finish_with_message(format!(
-        "Created Modrinth zip at '{}'.",
-        output_file.display()
-    ));
+    log::info!(
+        "Created Modrinth pack at '{}'.",
+        output_file.display().errstyle(FILE_STYLE)
+    );
 
     Ok(())
 }
@@ -333,24 +304,19 @@ pub enum CreateServerBaseError {
 }
 
 pub async fn create_server_base(
-    mods: &ModConfig,
+    pack: &PackConfig,
     source_dir: &Path,
     output_dir: PathBuf,
 ) -> Result<(), CreateServerBaseError> {
-    let multi = MultiProgress::new();
-    let action_pb = multi.add(ProgressBar::new_spinner().with_message(format!(
+    log::info!(
         "Creating server base at '{}'...",
-        output_dir.display()
-    )));
-    action_pb.enable_steady_tick(steady_tick_duration());
-
-    let progress_bar = multi.add(ProgressBar::new_spinner());
-    progress_bar.enable_steady_tick(steady_tick_duration());
+        output_dir.display().errstyle(FILE_STYLE)
+    );
 
     // Wipe the output dir first, so we don't have leftover files
     // Yes this defeats the hash check for now. TODO: cache files for the user as a whole
     if output_dir.exists() {
-        progress_bar.set_message("Cleaning output directory");
+        log::info!("Removing existing server base...");
         std::fs::remove_dir_all(&output_dir)?;
     }
 
@@ -358,24 +324,25 @@ pub async fn create_server_base(
     let mods_folder = output_dir.join(LIT_MODS);
     std::fs::create_dir_all(&mods_folder)?;
 
-    progress_bar.set_message("Copying overrides");
+    log::info!("Copying overrides...");
     clone_dir(
         source_dir.join(LIT_OVERRIDES),
         &output_dir,
         CreateServerBaseError::CloneDir,
     )?;
-    progress_bar.set_message("Copying server-specific overrides");
+    log::info!("Copying server-only overrides...");
     clone_dir(
         source_dir.join(LIT_SERVER_OVERRIDES),
         &output_dir,
         CreateServerBaseError::CloneDir,
     )?;
 
-    progress_bar.set_message("Downloading remote mods...");
-    download_mods(mods, multi.clone(), &mods_folder, |side| side.on_server()).await?;
+    download_mods(pack,&mods_folder, |side| side.on_server()).await?;
 
-    multi.remove(&progress_bar);
-    action_pb.set_message(format!("Created server base at '{}'", output_dir.display()));
+    log::info!(
+        "Created server base at '{}'.",
+        output_dir.display().errstyle(FILE_STYLE)
+    );
 
     Ok(())
 }
@@ -539,7 +506,6 @@ pub enum ZipModError {
 }
 
 async fn add_mod_to_zip<M: ModSite, W>(
-    multi: MultiProgress,
     mod_site: M,
     mod_id: ModId<M::Id>,
     zip: Arc<Mutex<ZipWriter<W>>>,
@@ -548,11 +514,6 @@ where
     W: Write + Seek,
 {
     let mod_info = mod_site.load_file(mod_id.clone()).await?;
-    let progress_bar = multi.add(
-        ProgressBar::new(mod_info.file_length)
-            .with_style(style_bar())
-            .with_message(mod_info.filename.clone()),
-    );
 
     let mut zip = zip.lock().await;
     zip.start_file(
@@ -560,19 +521,17 @@ where
         *ZIP_OPTIONS,
     )?;
 
-    let mut content = progress_bar.wrap_async_read(mod_site.download(mod_id).await?);
+    let mut content = mod_site.download(mod_id).await?;
     tokio::task::block_in_place(|| {
         std::io::copy(&mut SyncIoBridge::new(&mut content), zip.deref_mut())
     })?;
     drop(zip);
 
-    progress_bar.reset();
-    progress_bar.set_style(ProgressStyle::default_spinner());
-    progress_bar.finish_with_message(format!(
+    log::info!(
         "[{}] Mod {} downloaded.",
-        M::NAME,
-        mod_info.filename,
-    ));
+        M::NAME.errstyle(SITE_NAME_STYLE),
+        mod_info.filename.errstyle(FILE_STYLE),
+    );
 
     Ok(())
 }

@@ -3,7 +3,6 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::path::{Path, PathBuf};
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use thiserror::Error;
@@ -11,9 +10,11 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::config::mods::{Mod, ModSide};
-use crate::mod_site::{CurseForge, ModDownloadError, ModId, ModIdValue, ModLoadingError, ModSite, Modrinth, ModHash};
-use crate::progress::{steady_tick_duration, style_bar};
-use crate::ModConfig;
+use crate::config::pack::PackConfig;
+use crate::mod_site::{
+    CurseForge, ModDownloadError, ModHash, ModId, ModIdValue, ModLoadingError, ModSite, Modrinth,
+};
+use crate::uwu_colors::{ErrStyle, CONFIG_VAL_STYLE, FILE_STYLE, SITE_NAME_STYLE};
 
 #[derive(Debug, Error)]
 pub enum ModDownloadToFileError {
@@ -45,8 +46,7 @@ impl Display for ModsDownloadError {
 }
 
 pub(crate) async fn download_mods<F>(
-    mod_config: &ModConfig,
-    multi: MultiProgress,
+    pack_config: &PackConfig,
     dest_dir: &Path,
     side_test: F,
 ) -> Result<(), ModsDownloadError>
@@ -57,19 +57,17 @@ where
 
     download_from_site(
         CurseForge,
-        multi.clone(),
         dest_dir,
         &mut failures,
-        &mod_config.mods.curseforge,
+        &pack_config.mods.curseforge,
         side_test.clone(),
     )
     .await;
     download_from_site(
         Modrinth,
-        multi.clone(),
         dest_dir,
         &mut failures,
-        &mod_config.mods.modrinth,
+        &pack_config.mods.modrinth,
         side_test,
     )
     .await;
@@ -83,7 +81,6 @@ where
 
 async fn download_from_site<K, S, F>(
     site: S,
-    multi: MultiProgress,
     dest_dir: &Path,
     failures: &mut HashMap<String, ModDownloadToFileError>,
     mods: &HashMap<String, Mod<K>>,
@@ -100,7 +97,7 @@ async fn download_from_site<K, S, F>(
         .map(|(k, m)| {
             (
                 k.clone(),
-                submit_download(multi.clone(), k.clone(), m.source.clone(), site, dest_dir),
+                submit_download(k.clone(), m.source.clone(), site, dest_dir),
             )
         })
         .collect::<Vec<_>>();
@@ -109,11 +106,9 @@ async fn download_from_site<K, S, F>(
             failures.insert(cfg_id.clone(), e);
         }
     }
-    multi.clear().expect("bar cleared");
 }
 
 fn submit_download<K, S>(
-    multi: MultiProgress,
     cfg_id: String,
     mod_id: ModId<K>,
     site: S,
@@ -127,44 +122,39 @@ where
 
     let dest_dir = dest_dir.to_owned();
     tokio::task::spawn(async move {
-        let progress_bar = multi.add(ProgressBar::new_spinner().with_message(cfg_id.to_string()));
         let _guard = CONCURRENCY_LIMITER.acquire().await.expect("tokio failure");
-        progress_bar.enable_steady_tick(steady_tick_duration());
         let file_meta = site.load_file(mod_id.clone()).await?;
         let dest_file = dest_dir.join(&file_meta.filename);
         if dest_file.exists() {
             // Check if we already have the file.
             let content = tokio::fs::read(&dest_file).await?;
-            if file_meta.hash.check_hash_if_possible(&content).is_some_and(|valid| valid) {
-                progress_bar.disable_steady_tick();
-                progress_bar.finish_with_message(format!(
-                    "[{}] Found cached {}",
-                    S::NAME,
-                    file_meta.filename
-                ));
-                multi.remove(&progress_bar);
+            if file_meta
+                .hash
+                .check_hash_if_possible(&content)
+                .is_some_and(|valid| valid)
+            {
+                log::info!(
+                    "[{}] Found cached {} for {}",
+                    S::NAME.errstyle(SITE_NAME_STYLE),
+                    file_meta.filename.errstyle(FILE_STYLE),
+                    cfg_id.errstyle(CONFIG_VAL_STYLE),
+                );
                 return Ok(dest_file);
             }
         }
 
-        progress_bar.disable_steady_tick();
-        progress_bar.set_style(style_bar());
-        progress_bar.set_length(file_meta.file_length);
-        progress_bar.set_message(format!("[{}] {}", S::NAME, file_meta.filename));
-
         tokio::io::copy(
-            &mut progress_bar.wrap_async_read(site.download(mod_id).await?),
+            &mut site.download(mod_id).await?,
             &mut tokio::fs::File::create(&dest_file).await?,
         )
         .await?;
 
-        progress_bar.reset();
-        progress_bar.set_style(ProgressStyle::default_spinner());
-        progress_bar.finish_with_message(format!(
-            "[{}] Downloaded {}",
-            S::NAME,
-            file_meta.filename
-        ));
+        log::info!(
+            "[{}] Downloaded {} for {}",
+            S::NAME.errstyle(SITE_NAME_STYLE),
+            file_meta.filename.errstyle(FILE_STYLE),
+            cfg_id.errstyle(CONFIG_VAL_STYLE),
+        );
 
         Ok(dest_file)
     })

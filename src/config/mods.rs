@@ -6,11 +6,6 @@ use serde::Deserialize;
 use crate::mod_site::{DependencyId, ModId, ModIdValue};
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ModConfig {
-    pub mods: ModContainer,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct ModContainer {
     #[serde(default)]
     pub curseforge: HashMap<String, Mod<i32>>,

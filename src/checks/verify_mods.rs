@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
-use indicatif::{MultiProgress, ProgressBar};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use thiserror::Error;
@@ -10,12 +9,14 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::config::mods::Mod;
+use crate::config::pack::PackConfig;
 use crate::mod_site::{
     CurseForge, DependencyId, ModDependencyKind, ModFileInfo, ModFileLoadingResult, ModId,
     ModIdValue, ModLoadingError, ModSite, Modrinth,
 };
-use crate::progress::steady_tick_duration;
-use crate::ModConfig;
+use crate::uwu_colors::{
+    ErrStyle, CONFIG_VAL_STYLE, SITE_NAME_STYLE, SITE_VAL_STYLE, SUCCESS_STYLE,
+};
 
 #[derive(Debug, Error)]
 pub enum ModVerificationError {
@@ -51,24 +52,17 @@ impl Display for ModsVerificationError {
     }
 }
 
-pub(crate) async fn verify_mods(
-    mod_config: &ModConfig,
-    minecraft_version: &str,
-) -> Result<(), ModsVerificationError> {
-    let multi = MultiProgress::new();
-
+pub(crate) async fn verify_mods(pack_config: &PackConfig) -> Result<(), ModsVerificationError> {
     let cf_verify = submit_verify_site(
-        minecraft_version,
+        &pack_config.minecraft_version,
         CurseForge,
-        &multi,
-        &mod_config.mods.curseforge,
+        &pack_config.mods.curseforge,
     );
 
     let modrinth_verify = submit_verify_site(
-        minecraft_version,
+        &pack_config.minecraft_version,
         Modrinth,
-        &multi,
-        &mod_config.mods.modrinth,
+        &pack_config.mods.modrinth,
     );
 
     let mut failures = cf_verify.await.expect("tokio error");
@@ -80,25 +74,25 @@ pub(crate) async fn verify_mods(
         return Err(ModsVerificationError { failures });
     }
 
+    log::info!("{}", "Verified mods successfully.".errstyle(SUCCESS_STYLE));
+
     Ok(())
 }
 
 fn submit_verify_site<S>(
     minecraft_version: &str,
     site: S,
-    multi: &MultiProgress,
     mods: &HashMap<String, Mod<S::Id>>,
 ) -> JoinHandle<HashMap<String, ModVerificationError>>
 where
     S: ModSite,
     S::ModHash: Clone + Send + Sync + 'static,
 {
-    let multi = multi.clone();
     let mods = mods.clone();
     let minecraft_version = minecraft_version.to_string();
     tokio::spawn(async move {
         let mut failures = HashMap::<String, ModVerificationError>::new();
-        verify_mods_site(&minecraft_version, &mut failures, multi, mods, site).await;
+        verify_mods_site(&minecraft_version, &mut failures, mods, site).await;
         failures
     })
 }
@@ -106,7 +100,6 @@ where
 async fn verify_mods_site<K, S>(
     minecraft_version: &String,
     failures: &mut HashMap<String, ModVerificationError>,
-    multi: MultiProgress,
     mods: HashMap<String, Mod<K>>,
     site: S,
 ) where
@@ -132,14 +125,9 @@ async fn verify_mods_site<K, S>(
             }
         }
 
-        let progress_bar = multi.add(ProgressBar::new_spinner().with_message(k.clone()));
-        verifications.push((
-            k,
-            submit_load(progress_bar.clone(), m.source.clone(), site),
-            progress_bar,
-        ));
+        verifications.push((k, submit_load(m.source.clone(), site)));
     }
-    for (cfg_id, verification_ftr, progress_bar) in verifications {
+    for (cfg_id, verification_ftr) in verifications {
         let failure = match verification_ftr.await.expect("tokio failure") {
             Err(e) => Err(e.into()),
             Ok(loaded_mod) => verify_mod(
@@ -153,22 +141,21 @@ async fn verify_mods_site<K, S>(
             .await
             .map(|_| loaded_mod),
         };
-        progress_bar.disable_steady_tick();
         match failure {
             Ok(mod_info) => {
-                progress_bar.finish_with_message(format!(
+                log::info!(
                     "[{}] Mod {} (in config: {}) verified.",
-                    S::NAME,
-                    mod_info.project_info.name,
-                    cfg_id
-                ));
+                    S::NAME.errstyle(SITE_NAME_STYLE),
+                    mod_info.project_info.name.errstyle(SITE_VAL_STYLE),
+                    cfg_id.errstyle(CONFIG_VAL_STYLE)
+                );
             }
             Err(failure) => {
-                progress_bar.finish_with_message(format!(
+                log::info!(
                     "[{}] Mod (in config: {}) FAILED verification.",
-                    S::NAME,
-                    cfg_id
-                ));
+                    S::NAME.errstyle(SITE_NAME_STYLE),
+                    cfg_id.errstyle(CONFIG_VAL_STYLE)
+                );
                 failures.insert(cfg_id, failure);
             }
         }
@@ -223,11 +210,11 @@ where
                 .await?
                 {
                     log::info!(
-                        "[{}] [FYI] Missing optional dependency for {}: {} ({:?})",
-                        S::NAME,
-                        cfg_id,
-                        v,
-                        dep.id,
+                        "[{}] [FYI] Missing optional dependency for {}: {} (ID: {:?})",
+                        S::NAME.errstyle(SITE_NAME_STYLE),
+                        cfg_id.errstyle(CONFIG_VAL_STYLE),
+                        v.errstyle(SITE_VAL_STYLE),
+                        dep.id.errstyle(CONFIG_VAL_STYLE),
                     );
                 }
             }
@@ -278,7 +265,6 @@ where
 }
 
 fn submit_load<K, H>(
-    progress_bar: ProgressBar,
     mod_id: ModId<K>,
     site: impl ModSite<Id = K, ModHash = H>,
 ) -> JoinHandle<ModFileLoadingResult<K, H>>
@@ -286,11 +272,10 @@ where
     K: ModIdValue,
     H: Send + Sync + 'static,
 {
-    static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(30));
+    static CONCURRENCY_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(5));
 
     tokio::task::spawn(async move {
         let _guard = CONCURRENCY_LIMITER.acquire().await.expect("tokio failure");
-        progress_bar.enable_steady_tick(steady_tick_duration());
         site.load_file(mod_id).await
     })
 }

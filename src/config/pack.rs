@@ -1,6 +1,8 @@
 use derive_more::Display;
 use serde::Deserialize;
 
+use crate::config::mods::ModContainer;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PackConfig {
     pub name: String,
@@ -9,6 +11,7 @@ pub struct PackConfig {
     pub version: String,
     pub minecraft_version: String,
     pub mod_loader: ModLoader,
+    pub mods: ModContainer,
 }
 
 #[derive(Debug, Clone, Deserialize)]
