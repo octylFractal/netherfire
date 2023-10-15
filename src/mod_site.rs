@@ -251,11 +251,12 @@ where
         match request().await {
             Ok(v) => return Ok(v),
             Err(ferinth::Error::RateLimitExceeded(delay_sec)) => {
+                let adjusted_delay = std::cmp::max(delay_sec as u64 + 1, retries + 1);
                 if retries >= 5 {
                     return Err(ferinth::Error::RateLimitExceeded(delay_sec));
                 }
-                log::warn!("Retrying request in {} sec due to rate limit", delay_sec);
-                tokio::time::sleep(tokio::time::Duration::from_secs(delay_sec as u64)).await;
+                log::warn!("Retrying request in {} (+ {}) sec due to rate limit", delay_sec, adjusted_delay - delay_sec as u64);
+                tokio::time::sleep(tokio::time::Duration::from_secs(adjusted_delay as u64)).await;
                 retries += 1;
             }
             Err(e) => return Err(e),
