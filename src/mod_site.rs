@@ -254,7 +254,7 @@ where
                 if retries >= 5 {
                     return Err(ferinth::Error::RateLimitExceeded(delay_sec));
                 }
-                log::warn!("Retrying request in {} due to rate limit", delay_sec);
+                log::warn!("Retrying request in {} sec due to rate limit", delay_sec);
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay_sec as u64)).await;
                 retries += 1;
             }
