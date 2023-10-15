@@ -225,8 +225,8 @@ impl ModSite for Modrinth {
             .await?
             .files
             .into_iter()
-            .find(|f| f.primary)
-            .expect("no primary file");
+            .find_or_first(|f| f.primary)
+            .ok_or(ModDownloadError::NoFiles)?;
 
         reqwest_async_read(file_meta.url).await
     }
@@ -291,6 +291,8 @@ pub enum ModLoadingError {
 pub enum ModDownloadError {
     #[error("I/O Error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("The project and version exist, but they have no files")]
+    NoFiles,
     #[error("Reqwest Error: {0}")]
     Reqwest(#[from] reqwest::Error),
     #[error("CurseForge Error: {0}")]
