@@ -1,20 +1,20 @@
 use derive_more::Display;
 use serde::Deserialize;
 
-use crate::config::mods::ModContainer;
-
 #[derive(Debug, Clone, Deserialize)]
-pub struct PackConfig {
+#[serde(deny_unknown_fields)]
+pub struct PackConfig<MC> {
     pub name: String,
     pub description: String,
     pub author: String,
     pub version: String,
     pub minecraft_version: String,
     pub mod_loader: ModLoader,
-    pub mods: ModContainer,
+    pub mods: MC,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModLoader {
     pub id: ModLoaderType,
     pub version: String,

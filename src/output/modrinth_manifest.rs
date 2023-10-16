@@ -1,3 +1,5 @@
+use crate::checks::verify_mods::KnownEnvRequirements;
+use crate::config::mods::KnownEnvRequirement;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -38,15 +40,17 @@ pub struct ModFileHashes {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
-    pub client: EnvRequirement,
-    pub server: EnvRequirement,
+    pub client: KnownEnvRequirement,
+    pub server: KnownEnvRequirement,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum EnvRequirement {
-    Required,
-    Unsupported,
+impl From<KnownEnvRequirements> for Environment {
+    fn from(reqs: KnownEnvRequirements) -> Self {
+        Self {
+            client: reqs.client,
+            server: reqs.server,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

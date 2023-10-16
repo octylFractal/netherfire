@@ -8,6 +8,7 @@ use log::LevelFilter;
 use thiserror::Error;
 
 use crate::checks::verify_mods::{verify_mods, ModsVerificationError};
+use crate::config::mods::ConfigModContainer;
 use crate::config::pack::PackConfig;
 use crate::output::{
     create_curseforge_zip, create_modrinth_pack, create_server_base, CreateCurseForgeZipError,
@@ -35,15 +36,35 @@ pub struct Netherfire {
     pub source: PathBuf,
     /// Write a CurseForge-format client modpack ZIP to the given path.
     /// The path should be a directory, the ZIP will be written under it.
+    ///
+    /// The CurseForge modpack format does not support optional mods, so all optional mods will be
+    /// marked as required or included in the ZIP by default. To disable this, pass
+    /// `--no-cf-zip-include-optional`.
     #[clap(long)]
     pub create_curseforge_zip: Option<PathBuf>,
+    /// Should clientside-optional mods be included in the CurseForge ZIP?
+    #[clap(long, requires("create_curseforge_zip"))]
+    pub no_cf_zip_include_optional: bool,
     /// Write a Modrinth `.mrpack` to the given path.
     /// The path should be a directory, the pack will be written under it.
+    ///
+    /// Modrinth supports optional mods, so optional mods will be marked as such in the pack.
+    /// However, CurseForge mods cannot be marked as optional, so they will be included in the ZIP.
+    /// To disable this, pass `--no-mrpack-include-optional`.
     #[clap(long)]
     pub create_modrinth_pack: Option<PathBuf>,
+    /// Should CurseForge optional mods be included in the Modrinth pack?
+    #[clap(long, requires("create_modrinth_pack"))]
+    pub no_mrpack_include_optional: bool,
     /// Produce a server base folder by downloading mods if needed.
+    ///
+    /// Optional mods will be included by default. To disable this, pass
+    /// `--no-server-base-include-optional`.
     #[clap(long)]
     pub create_server_base: Option<PathBuf>,
+    /// Should optional mods be included in the server base?
+    #[clap(long, requires("create_server_base"))]
+    pub no_server_base_include_optional: bool,
     /// Verbosity level, repeat to increase.
     #[clap(short, action = clap::ArgAction::Count)]
     pub verbosity: u8,
@@ -116,20 +137,39 @@ async fn main() -> ExitCode {
 async fn main_for_result(args: Netherfire) -> Result<(), NetherfireError> {
     let path = args.source.join("config.toml");
     let s = std::fs::read_to_string(path).map_err(ConfigLoadError::from)?;
-    let pack_config = toml::from_str::<PackConfig>(&s).map_err(ConfigLoadError::from)?;
+    let pack_config =
+        toml::from_str::<PackConfig<ConfigModContainer>>(&s).map_err(ConfigLoadError::from)?;
 
-    verify_mods(&pack_config).await?;
+    let pack_config = verify_mods(pack_config).await?;
 
     if let Some(cf_zip) = args.create_curseforge_zip {
-        create_curseforge_zip(&pack_config, &args.source, cf_zip).await?;
+        create_curseforge_zip(
+            &pack_config,
+            &args.source,
+            cf_zip,
+            !args.no_cf_zip_include_optional,
+        )
+        .await?;
     }
 
     if let Some(mrpack) = args.create_modrinth_pack {
-        create_modrinth_pack(&pack_config, &args.source, mrpack).await?;
+        create_modrinth_pack(
+            &pack_config,
+            &args.source,
+            mrpack,
+            !args.no_mrpack_include_optional,
+        )
+        .await?;
     }
 
     if let Some(server_base_dir) = args.create_server_base {
-        create_server_base(&pack_config, &args.source, server_base_dir).await?;
+        create_server_base(
+            &pack_config,
+            &args.source,
+            server_base_dir,
+            !args.no_server_base_include_optional,
+        )
+        .await?;
     }
 
     Ok(())

@@ -28,12 +28,11 @@ pack, but they may be downloaded and included as an override, increasing the siz
 
 There are two sections in the `mods.toml`: `mods.curseforge` and `mods.modrinth`. Each section contains a list of
 mods to include from the respective mod site. CurseForge mods use an `i32` project and version ID, while Modrinth mods
-use
-a `String` project and version ID. Do not use the slug for Modrinth mods, as it is subject to change and will introduce
-errors.
+use a `String` project and version ID. Do not use the slug for Modrinth mods, as it is subject to change and will
+introduce errors.
 
-Each section contains a set of mappings from an arbitrary identifier to the `project_id`, `version_id`, and optionally
-a `side` (either `client` or `server`). If a mod includes bad dependency information, you can also exclude the bad
+Each section contains a set of mappings from an arbitrary identifier to the `project_id`, `version_id`, and requirement
+information (`client` and `server`). If a mod includes bad dependency information, you can also exclude the bad
 dependency via `ignored_dependencies`.
 
 As an example, here is a `mods.toml` for a modpack that includes the Fabric API and JEI for 1.20.1 from both CurseForge
@@ -42,11 +41,12 @@ and Modrinth:
 ```toml
 [mods.curseforge]
 fabric-api = { project_id = 306612, version_id = 4787692 }
-jei = { project_id = 238222, version_id = 4712867, side = "client" }
+jei = { project_id = 238222, version_id = 4712867, server = "optional" }
 
 [mods.modrinth]
 fabric-api = { project_id = "P7dR8mSH", version_id = "tFw0iWAk" }
-jei = { project_id = "u6dRKJwZ", version_id = "lIRFslED", side = "client" }
+# Note that there is no explicit `server` marking here, as the correct value is inherited from the Modrinth metadata.
+jei = { project_id = "u6dRKJwZ", version_id = "lIRFslED" }
 ```
 
 Optionally, also add files to `overrides/`, `client-overrides/`, and `server-overrides/` to include any files you want

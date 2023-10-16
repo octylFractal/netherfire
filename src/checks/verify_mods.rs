@@ -8,7 +8,9 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use crate::config::mods::Mod;
+use crate::config::mods::{
+    compute_env, ConfigMod, ConfigModContainer, EnvRequirement, KnownEnvRequirement,
+};
 use crate::config::pack::PackConfig;
 use crate::mod_site::{
     CurseForge, DependencyId, ModDependencyKind, ModFileInfo, ModFileLoadingResult, ModId,
@@ -17,6 +19,25 @@ use crate::mod_site::{
 use crate::uwu_colors::{
     ErrStyle, CONFIG_VAL_STYLE, SITE_NAME_STYLE, SITE_VAL_STYLE, SUCCESS_STYLE,
 };
+
+#[derive(Debug, Clone)]
+pub struct VerifiedModContainer {
+    pub curseforge: HashMap<String, VerifiedMod<CurseForge>>,
+    pub modrinth: HashMap<String, VerifiedMod<Modrinth>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedMod<S: ModSite> {
+    pub source: ModId<S::Id>,
+    pub info: ModFileInfo<S::Id, S::ModHash>,
+    pub env_requirements: KnownEnvRequirements,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct KnownEnvRequirements {
+    pub client: KnownEnvRequirement,
+    pub server: KnownEnvRequirement,
+}
 
 #[derive(Debug, Error)]
 pub enum ModVerificationError {
@@ -54,57 +75,63 @@ impl Display for ModsVerificationError {
     }
 }
 
-pub(crate) async fn verify_mods(pack_config: &PackConfig) -> Result<(), ModsVerificationError> {
-    let cf_verify = submit_verify_site(
-        &pack_config.minecraft_version,
+pub(crate) async fn verify_mods(
+    pack_config: PackConfig<ConfigModContainer>,
+) -> Result<PackConfig<VerifiedModContainer>, ModsVerificationError> {
+    let cf_verify = tokio::spawn(verify_mods_site(
+        pack_config.minecraft_version.clone(),
+        pack_config.mods.curseforge,
         CurseForge,
-        &pack_config.mods.curseforge,
-    );
+    ));
 
-    let modrinth_verify = submit_verify_site(
-        &pack_config.minecraft_version,
+    let modrinth_verify = tokio::spawn(verify_mods_site(
+        pack_config.minecraft_version.clone(),
+        pack_config.mods.modrinth,
         Modrinth,
-        &pack_config.mods.modrinth,
-    );
+    ));
 
-    let mut failures = cf_verify.await.expect("tokio error");
-    for (k, v) in modrinth_verify.await.expect("tokio error").drain() {
-        failures.insert(k, v);
-    }
+    let cf_result = cf_verify.await.expect("tokio error");
+    let modrinth_result = modrinth_verify.await.expect("tokio error");
 
-    if !failures.is_empty() {
-        return Err(ModsVerificationError { failures });
-    }
+    let mod_container = match (cf_result, modrinth_result) {
+        (Ok(curseforge), Ok(modrinth)) => VerifiedModContainer {
+            curseforge,
+            modrinth,
+        },
+        (cf_result, modrinth_result) => {
+            let mut failures = HashMap::new();
+
+            if let Err(e) = cf_result {
+                failures.extend(e);
+            }
+
+            if let Err(e) = modrinth_result {
+                failures.extend(e);
+            }
+
+            return Err(ModsVerificationError { failures });
+        }
+    };
 
     log::info!("{}", "Verified mods successfully.".errstyle(SUCCESS_STYLE));
 
-    Ok(())
-}
-
-fn submit_verify_site<S>(
-    minecraft_version: &str,
-    site: S,
-    mods: &HashMap<String, Mod<S::Id>>,
-) -> JoinHandle<HashMap<String, ModVerificationError>>
-where
-    S: ModSite,
-    S::ModHash: Clone + Send + Sync + 'static,
-{
-    let mods = mods.clone();
-    let minecraft_version = minecraft_version.to_string();
-    tokio::spawn(async move {
-        let mut failures = HashMap::<String, ModVerificationError>::new();
-        verify_mods_site(&minecraft_version, &mut failures, mods, site).await;
-        failures
+    Ok(PackConfig {
+        name: pack_config.name,
+        description: pack_config.description,
+        author: pack_config.author,
+        version: pack_config.version,
+        minecraft_version: pack_config.minecraft_version,
+        mod_loader: pack_config.mod_loader,
+        mods: mod_container,
     })
 }
 
 async fn verify_mods_site<K, S>(
-    minecraft_version: &String,
-    failures: &mut HashMap<String, ModVerificationError>,
-    mods: HashMap<String, Mod<K>>,
+    minecraft_version: String,
+    mods: HashMap<String, ConfigMod<K>>,
     site: S,
-) where
+) -> Result<HashMap<String, VerifiedMod<S>>, HashMap<String, ModVerificationError>>
+where
     K: ModIdValue,
     S: ModSite<Id = K>,
     S::ModHash: Clone + Send + Sync + 'static,
@@ -127,13 +154,16 @@ async fn verify_mods_site<K, S>(
             }
         }
 
-        verifications.push((k, submit_load(m.source.clone(), site)));
+        let id = m.source.clone();
+        verifications.push((k, m, submit_load(id, site)));
     }
-    for (cfg_id, verification_ftr) in verifications {
+    let mut verification_results = HashMap::with_capacity(verifications.len());
+    let mut failures = HashMap::new();
+    for (cfg_id, m, verification_ftr) in verifications {
         let failure = match verification_ftr.await.expect("tokio failure") {
             Err(e) => Err(e.into()),
             Ok(loaded_mod) => verify_mod(
-                minecraft_version,
+                &minecraft_version,
                 &mods_by_project_id,
                 &mods_by_version_id,
                 &cfg_id,
@@ -151,6 +181,33 @@ async fn verify_mods_site<K, S>(
                     mod_info.project_info.name.errstyle(SITE_VAL_STYLE),
                     cfg_id.errstyle(CONFIG_VAL_STYLE)
                 );
+
+                let map_env = |side: &'static str,
+                               cfg_env: EnvRequirement,
+                               site_env: EnvRequirement|
+                 -> KnownEnvRequirement {
+                    let (ret, warning) = compute_env(cfg_env, site_env);
+                    if let Some(warning) = warning {
+                        log::warn!(
+                            "Warning about env requirement for {} on side {}: {}",
+                            cfg_id.errstyle(CONFIG_VAL_STYLE),
+                            side,
+                            warning
+                        );
+                    }
+                    ret
+                };
+
+                let client = map_env("client", m.client, mod_info.project_info.side_info.client);
+                let server = map_env("server", m.server, mod_info.project_info.side_info.server);
+                verification_results.insert(
+                    cfg_id,
+                    VerifiedMod {
+                        source: m.source,
+                        info: mod_info,
+                        env_requirements: KnownEnvRequirements { client, server },
+                    },
+                );
             }
             Err(failure) => {
                 log::info!(
@@ -161,6 +218,11 @@ async fn verify_mods_site<K, S>(
                 failures.insert(cfg_id, failure);
             }
         }
+    }
+    if failures.is_empty() {
+        Ok(verification_results)
+    } else {
+        Err(failures)
     }
 }
 

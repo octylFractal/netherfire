@@ -1,24 +1,29 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::mod_site::{DependencyId, ModId, ModIdValue};
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ModContainer {
+#[serde(deny_unknown_fields)]
+pub struct ConfigModContainer {
     #[serde(default)]
-    pub curseforge: HashMap<String, Mod<i32>>,
+    pub curseforge: HashMap<String, ConfigMod<i32>>,
     #[serde(default)]
-    pub modrinth: HashMap<String, Mod<String>>,
+    pub modrinth: HashMap<String, ConfigMod<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Mod<K: ModIdValue> {
+#[serde(deny_unknown_fields)]
+pub struct ConfigMod<K: ModIdValue> {
     #[serde(flatten)]
     pub source: ModId<K>,
     #[serde(default)]
-    pub side: ModSide,
+    pub client: EnvRequirement,
+    #[serde(default)]
+    pub server: EnvRequirement,
     /// Dependencies to ignore when validating.
     #[serde(default)]
     pub ignored_deps: Vec<DependencyId<K>>,
@@ -26,24 +31,78 @@ pub struct Mod<K: ModIdValue> {
 
 #[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum ModSide {
-    Both,
-    Client,
-    Server,
+pub enum EnvRequirement {
+    /// Inherit from the state defined by the mod site or [`Required`].
+    Unknown,
+    Required,
+    Optional,
+    Unsupported,
 }
 
-impl ModSide {
-    pub fn on_client(self) -> bool {
-        self != Self::Server
-    }
-
-    pub fn on_server(self) -> bool {
-        self != Self::Client
-    }
-}
-
-impl Default for ModSide {
+impl Default for EnvRequirement {
     fn default() -> Self {
-        Self::Both
+        Self::Unknown
+    }
+}
+
+// Warning -- this type is explicitly compatible with the Modrinth pack format, and should not be
+// changed incompatibly without adding a different type for the format.
+#[derive(Debug, Copy, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum KnownEnvRequirement {
+    Required,
+    Optional,
+    Unsupported,
+}
+
+impl KnownEnvRequirement {
+    pub fn is_needed(&self, need_optional: bool) -> bool {
+        match self {
+            KnownEnvRequirement::Required => true,
+            KnownEnvRequirement::Optional => need_optional,
+            KnownEnvRequirement::Unsupported => false,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ComputeEnvWarning {
+    #[error(
+        "The config allowed the mod on this side, but it was marked as unsupported on the site."
+    )]
+    ConfigAllowedButSiteUnsupported,
+    #[error(
+        "The site allowed the mod on this side, but it was marked as unsupported in the config."
+    )]
+    SiteAllowedButConfigUnsupported,
+}
+
+/// Given the env from the config and the site, compute the actual env. Never returns [`EnvRequirement::Unknown`].
+pub fn compute_env(
+    cfg_env: EnvRequirement,
+    site_env: EnvRequirement,
+) -> (KnownEnvRequirement, Option<ComputeEnvWarning>) {
+    match cfg_env {
+        EnvRequirement::Unknown => match site_env {
+            EnvRequirement::Required => (KnownEnvRequirement::Required, None),
+            EnvRequirement::Optional => (KnownEnvRequirement::Optional, None),
+            EnvRequirement::Unsupported => (KnownEnvRequirement::Unsupported, None),
+            EnvRequirement::Unknown => (KnownEnvRequirement::Required, None),
+        },
+        EnvRequirement::Required | EnvRequirement::Optional => {
+            let warning = (site_env == EnvRequirement::Unsupported)
+                .then_some(ComputeEnvWarning::ConfigAllowedButSiteUnsupported);
+            if cfg_env == EnvRequirement::Required {
+                (KnownEnvRequirement::Required, warning)
+            } else {
+                (KnownEnvRequirement::Optional, warning)
+            }
+        }
+        EnvRequirement::Unsupported => {
+            let warning = (site_env == EnvRequirement::Required
+                || site_env == EnvRequirement::Optional)
+                .then_some(ComputeEnvWarning::SiteAllowedButConfigUnsupported);
+            (KnownEnvRequirement::Unsupported, warning)
+        }
     }
 }

@@ -12,12 +12,15 @@ use tokio_util::io::SyncIoBridge;
 use walkdir::WalkDir;
 use zip::{CompressionMethod, ZipWriter};
 
+use crate::checks::verify_mods::{VerifiedMod, VerifiedModContainer};
 use crate::config::pack::ModLoaderType;
-use crate::mod_site::{CurseForge, ModDownloadError, ModId, ModLoadingError, ModSite, Modrinth};
+use crate::mod_site::ModSite;
 use crate::output::curseforge_manifest::{
     CurseForgeManifest, ManifestFile, ManifestType, Minecraft, ModLoader,
 };
-use crate::output::mod_download::{download_mods, ModsDownloadError};
+use crate::output::mod_download::{
+    download_mods, mod_download, ModDownloadError, ModsDownloadError,
+};
 use crate::output::modrinth_manifest::ModrinthManifest;
 use crate::uwu_colors::{ErrStyle, FILE_STYLE, SITE_NAME_STYLE};
 use crate::PackConfig;
@@ -50,9 +53,10 @@ static ZIP_OPTIONS: Lazy<zip::write::FileOptions> = Lazy::new(|| {
 });
 
 pub async fn create_curseforge_zip(
-    pack: &PackConfig,
+    pack: &PackConfig<VerifiedModContainer>,
     source_dir: &Path,
     output_dir: PathBuf,
+    include_optional: bool,
 ) -> Result<(), CreateCurseForgeZipError> {
     let output_file = output_dir.join(format!("{} ({}).zip", pack.name, pack.version));
 
@@ -73,11 +77,14 @@ pub async fn create_curseforge_zip(
     let zip_arc = Arc::new(Mutex::new(zip));
     let mut zip_dl_tasks = Vec::with_capacity(pack.mods.modrinth.len());
     for (cfg_id, mod_) in &pack.mods.modrinth {
+        if !mod_.env_requirements.client.is_needed(include_optional) {
+            continue;
+        }
         zip_dl_tasks.push((
             cfg_id,
             spawn(add_mod_to_zip(
-                Modrinth,
-                mod_.source.clone(),
+                mod_.clone(),
+                LIT_OVERRIDES,
                 Arc::clone(&zip_arc),
             )),
         ));
@@ -124,7 +131,7 @@ pub async fn create_curseforge_zip(
             .mods
             .curseforge
             .values()
-            .filter(|m| m.side.on_client())
+            .filter(|m| m.env_requirements.client.is_needed(include_optional))
             .map(|m| ManifestFile {
                 project_id: m.source.project_id,
                 file_id: m.source.version_id,
@@ -160,14 +167,13 @@ pub enum CreateModrinthPackError {
     ZipDir(String, #[source] ZipDirError),
     #[error("Zipping mod {0} failed: {1}")]
     ZipMod(String, #[source] ZipModError),
-    #[error("Failed to load mod {0} metadata: {1}")]
-    ModrinthModLoad(String, #[source] ModLoadingError),
 }
 
 pub async fn create_modrinth_pack(
-    pack: &PackConfig,
+    pack: &PackConfig<VerifiedModContainer>,
     source_dir: &Path,
     output_dir: PathBuf,
+    include_optional: bool,
 ) -> Result<(), CreateModrinthPackError> {
     let output_file = output_dir.join(format!("{} ({}).mrpack", pack.name, pack.version));
 
@@ -178,35 +184,17 @@ pub async fn create_modrinth_pack(
 
     std::fs::create_dir_all(&output_dir)?;
 
-    log::info!(
-        "Fetching {} metadata...",
-        "Modrinth".errstyle(SITE_NAME_STYLE)
-    );
     let mut modrinth_files = Vec::with_capacity(pack.mods.modrinth.len());
-    for (cfg_id, mod_) in &pack.mods.modrinth {
-        let mod_info = Modrinth
-            .load_file(mod_.source.clone())
-            .await
-            .map_err(|e| CreateModrinthPackError::ModrinthModLoad(cfg_id.clone(), e))?;
+    for mod_ in pack.mods.modrinth.values() {
+        let mod_info = &mod_.info;
         modrinth_files.push(modrinth_manifest::ModFile {
             path: format!("mods/{}", mod_info.filename),
             hashes: modrinth_manifest::ModFileHashes {
                 sha1: format!("{:x}", mod_info.hash.sha1),
                 sha512: format!("{:x}", mod_info.hash.sha512),
             },
-            env: Some(modrinth_manifest::Environment {
-                client: if mod_.side.on_client() {
-                    modrinth_manifest::EnvRequirement::Required
-                } else {
-                    modrinth_manifest::EnvRequirement::Unsupported
-                },
-                server: if mod_.side.on_server() {
-                    modrinth_manifest::EnvRequirement::Required
-                } else {
-                    modrinth_manifest::EnvRequirement::Unsupported
-                },
-            }),
-            downloads: vec![mod_info.url],
+            env: Some(mod_.env_requirements.into()),
+            downloads: vec![mod_info.url.clone()],
             file_size: mod_info.file_length,
         });
     }
@@ -221,11 +209,20 @@ pub async fn create_modrinth_pack(
     let zip_arc = Arc::new(Mutex::new(zip));
     let mut zip_dl_tasks = Vec::with_capacity(pack.mods.curseforge.len());
     for (cfg_id, mod_) in &pack.mods.curseforge {
+        let overrides = match (
+            mod_.env_requirements.client.is_needed(include_optional),
+            mod_.env_requirements.server.is_needed(include_optional),
+        ) {
+            (true, true) => LIT_OVERRIDES,
+            (true, false) => LIT_CLIENT_OVERRIDES,
+            (false, true) => LIT_SERVER_OVERRIDES,
+            (false, false) => continue,
+        };
         zip_dl_tasks.push((
             cfg_id,
             spawn(add_mod_to_zip(
-                CurseForge,
-                mod_.source,
+                mod_.clone(),
+                overrides,
                 Arc::clone(&zip_arc),
             )),
         ));
@@ -313,9 +310,10 @@ pub enum CreateServerBaseError {
 }
 
 pub async fn create_server_base(
-    pack: &PackConfig,
+    pack: &PackConfig<VerifiedModContainer>,
     source_dir: &Path,
     output_dir: PathBuf,
+    include_optional: bool,
 ) -> Result<(), CreateServerBaseError> {
     log::info!(
         "Creating server base at '{}'...",
@@ -346,7 +344,10 @@ pub async fn create_server_base(
         CreateServerBaseError::CloneDir,
     )?;
 
-    download_mods(pack, &mods_folder, |side| side.on_server()).await?;
+    download_mods(pack, &mods_folder, |reqs| {
+        reqs.server.is_needed(include_optional)
+    })
+    .await?;
 
     log::info!(
         "Created server base at '{}'.",
@@ -506,31 +507,29 @@ where
 pub enum ZipModError {
     #[error("I/O Error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Mod loading Error: {0}")]
-    ModLoading(#[from] ModLoadingError),
     #[error("Mod download Error: {0}")]
     ModDownload(#[from] ModDownloadError),
     #[error("Zip Error: {0}")]
     Zip(#[from] zip::result::ZipError),
 }
 
-async fn add_mod_to_zip<M: ModSite, W>(
-    mod_site: M,
-    mod_id: ModId<M::Id>,
+async fn add_mod_to_zip<S: ModSite, W>(
+    mod_: VerifiedMod<S>,
+    dest_overrides: &'static str,
     zip: Arc<Mutex<ZipWriter<W>>>,
 ) -> Result<(), ZipModError>
 where
     W: Write + Seek,
 {
-    let mod_info = mod_site.load_file(mod_id.clone()).await?;
+    let mod_info = mod_.info;
 
     let mut zip = zip.lock().await;
     zip.start_file(
-        [LIT_OVERRIDES, LIT_MODS, &mod_info.filename].join("/"),
+        [dest_overrides, LIT_MODS, &mod_info.filename].join("/"),
         *ZIP_OPTIONS,
     )?;
 
-    let mut content = mod_site.download(mod_id).await?;
+    let mut content = mod_download(mod_info.url).await?;
     tokio::task::block_in_place(|| {
         std::io::copy(&mut SyncIoBridge::new(&mut content), zip.deref_mut())
     })?;
@@ -538,7 +537,7 @@ where
 
     log::info!(
         "[{}] Mod {} downloaded.",
-        M::NAME.errstyle(SITE_NAME_STYLE),
+        S::NAME.errstyle(SITE_NAME_STYLE),
         mod_info.filename.errstyle(FILE_STYLE),
     );
 

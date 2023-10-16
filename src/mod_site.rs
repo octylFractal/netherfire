@@ -1,20 +1,16 @@
 use std::fmt::Debug;
 use std::future::Future;
-use std::pin::Pin;
 
 use digest::Digest;
-use ferinth::structures::project::ProjectType;
+use ferinth::structures::project::{ProjectSupportRange, ProjectType};
 use ferinth::structures::version::DependencyType;
 use furse::structures::file_structs::{FileRelationType, HashAlgo};
-use futures::TryStreamExt;
 use itertools::Itertools;
-use reqwest::Url;
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::io::AsyncRead;
-use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::config::global::{FERINTH, FURSE};
+use crate::config::mods::EnvRequirement;
 
 pub trait ModIdValue: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {}
 
@@ -46,11 +42,9 @@ pub trait ModSite: Copy + Clone + Send + Sync + 'static {
 
     async fn load_file(&self, id: ModId<Self::Id>)
         -> ModFileLoadingResult<Self::Id, Self::ModHash>;
-
-    async fn download(&self, id: ModId<Self::Id>) -> ModDownloadResult;
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct CurseForge;
 
 #[async_trait::async_trait]
@@ -67,6 +61,10 @@ impl ModSite for CurseForge {
         Ok(ModInfo {
             name: furse_mod.name,
             distribution_allowed: furse_mod.allow_mod_distribution.unwrap_or(true),
+            side_info: SideInfo {
+                client: EnvRequirement::Unknown,
+                server: EnvRequirement::Unknown,
+            },
         })
     }
 
@@ -112,13 +110,6 @@ impl ModSite for CurseForge {
             hash: CFHash { sha1, md5 },
         })
     }
-
-    async fn download(&self, id: ModId<Self::Id>) -> ModDownloadResult {
-        let file_meta = FURSE.get_mod_file(id.project_id, id.version_id).await?;
-
-        let url = file_meta.download_url.expect("verified earlier");
-        reqwest_async_read(url).await
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +130,7 @@ impl ModHash for CFHash {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct Modrinth;
 
 #[async_trait::async_trait]
@@ -159,6 +150,10 @@ impl ModSite for Modrinth {
         Ok(ModInfo {
             name: ferinth_mod.title,
             distribution_allowed: true,
+            side_info: SideInfo {
+                client: ferinth_mod.client_side.into(),
+                server: ferinth_mod.server_side.into(),
+            },
         })
     }
 
@@ -219,27 +214,17 @@ impl ModSite for Modrinth {
             },
         })
     }
-
-    async fn download(&self, id: ModId<Self::Id>) -> ModDownloadResult {
-        let file_meta = ferinth_with_retry(|| FERINTH.get_version(&id.version_id))
-            .await?
-            .files
-            .into_iter()
-            .find_or_first(|f| f.primary)
-            .ok_or(ModDownloadError::NoFiles)?;
-
-        reqwest_async_read(file_meta.url).await
-    }
 }
 
-async fn reqwest_async_read(url: Url) -> Result<BoxAsyncRead, ModDownloadError> {
-    let req = reqwest::get(url).await?.error_for_status()?;
-    Ok(Box::pin(
-        req.bytes_stream()
-            .map_err(|e| futures::io::Error::new(futures::io::ErrorKind::Other, e))
-            .into_async_read()
-            .compat(),
-    ))
+impl From<ProjectSupportRange> for EnvRequirement {
+    fn from(range: ProjectSupportRange) -> Self {
+        match range {
+            ProjectSupportRange::Unknown => EnvRequirement::Unknown,
+            ProjectSupportRange::Required => EnvRequirement::Required,
+            ProjectSupportRange::Optional => EnvRequirement::Optional,
+            ProjectSupportRange::Unsupported => EnvRequirement::Unsupported,
+        }
+    }
 }
 
 async fn ferinth_with_retry<T, Fut>(request: impl Fn() -> Fut) -> ferinth::Result<T>
@@ -255,7 +240,11 @@ where
                 if retries >= 5 {
                     return Err(ferinth::Error::RateLimitExceeded(delay_sec));
                 }
-                log::warn!("Retrying request in {} (+ {}) sec due to rate limit", delay_sec, adjusted_delay - delay_sec as u64);
+                log::warn!(
+                    "Retrying request in {} (+ {}) sec due to rate limit",
+                    delay_sec,
+                    adjusted_delay - delay_sec as u64
+                );
                 tokio::time::sleep(tokio::time::Duration::from_secs(adjusted_delay)).await;
                 retries += 1;
             }
@@ -282,20 +271,6 @@ pub enum ModLoadingError {
     NotAMod,
     #[error("The project and version exist, but they have no files")]
     NoFiles,
-    #[error("CurseForge Error: {0}")]
-    Furse(#[from] furse::Error),
-    #[error("Modrinth Error: {0}")]
-    Ferinth(#[from] ferinth::Error),
-}
-
-#[derive(Debug, Error)]
-pub enum ModDownloadError {
-    #[error("I/O Error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("The project and version exist, but they have no files")]
-    NoFiles,
-    #[error("Reqwest Error: {0}")]
-    Reqwest(#[from] reqwest::Error),
     #[error("CurseForge Error: {0}")]
     Furse(#[from] furse::Error),
     #[error("Modrinth Error: {0}")]
@@ -338,6 +313,13 @@ pub fn check_hash<D: Digest + Default>(value: &digest::Output<D>, content: &[u8]
 pub struct ModInfo {
     pub name: String,
     pub distribution_allowed: bool,
+    pub side_info: SideInfo,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SideInfo {
+    pub client: EnvRequirement,
+    pub server: EnvRequirement,
 }
 
 #[derive(Debug, Clone)]
@@ -375,7 +357,3 @@ pub enum ModDependencyKind {
     Optional,
     Other,
 }
-
-type BoxAsyncRead = Pin<Box<dyn AsyncRead + Send + Sync>>;
-
-pub type ModDownloadResult = Result<BoxAsyncRead, ModDownloadError>;
