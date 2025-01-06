@@ -23,12 +23,12 @@ pub struct ModLoader {
 #[derive(Debug, Display, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModLoaderType {
-    #[display(fmt = "forge")]
+    #[display("forge")]
     Forge,
-    #[display(fmt = "neoforge")]
+    #[display("neoforge")]
     Neoforge,
-    #[display(fmt = "fabric")]
+    #[display("fabric")]
     Fabric,
-    #[display(fmt = "quilt")]
+    #[display("quilt")]
     Quilt,
 }

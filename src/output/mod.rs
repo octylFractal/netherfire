@@ -48,7 +48,7 @@ pub enum CreateCurseForgeZipError {
     ZipMod(String, #[source] ZipModError),
 }
 
-static ZIP_OPTIONS: Lazy<zip::write::FileOptions> = Lazy::new(|| {
+static ZIP_OPTIONS: Lazy<zip::write::FileOptions<()>> = Lazy::new(|| {
     zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated)
 });
 
@@ -487,7 +487,7 @@ where
             ]
             .join("/");
             if ft.is_file() {
-                to.start_file(&dest_path, *ZIP_OPTIONS)?;
+                to.start_file(&*dest_path, *ZIP_OPTIONS)?;
                 std::io::copy(&mut std::fs::File::open(&src_path)?, to)?;
                 log::debug!("Copied {} to {}", src_path.display(), dest_path);
             } else {

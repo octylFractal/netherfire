@@ -110,7 +110,7 @@ async fn main() -> ExitCode {
             _ => LevelFilter::Trace,
         })
         .format(move |buf, record| {
-            write!(buf, "[{}] ", buf.default_styled_level(record.level()))?;
+            write!(buf, "[{}] ", buf.default_level_style(record.level()))?;
 
             if verbosity > 0 {
                 // Include the location of the log message if verbose.
