@@ -11,10 +11,23 @@ use thiserror::Error;
 
 use crate::config::global::{FERINTH, FURSE};
 use crate::config::mods::EnvRequirement;
+use crate::config::pack::{ModLoaderType, PackConfig};
 
-pub trait ModIdValue: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {}
+pub trait ModIdValue: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {
+    fn into_toml_edit_value(self) -> toml_edit::Value;
+}
 
-impl<T> ModIdValue for T where T: Clone + Debug + Eq + std::hash::Hash + Send + Sync + 'static {}
+impl ModIdValue for i32 {
+    fn into_toml_edit_value(self) -> toml_edit::Value {
+        toml_edit::Value::from(self as i64)
+    }
+}
+
+impl ModIdValue for String {
+    fn into_toml_edit_value(self) -> toml_edit::Value {
+        toml_edit::Value::from(self)
+    }
+}
 
 pub trait ModHash: Clone + Send + Sync + 'static {
     /// Use the strongest available hash to check the content, if possible.
@@ -42,6 +55,12 @@ pub trait ModSite: Copy + Clone + Send + Sync + 'static {
 
     async fn load_file(&self, id: ModId<Self::Id>)
         -> ModFileLoadingResult<Self::Id, Self::ModHash>;
+
+    async fn get_latest_version_for_pack<MC: Sync>(
+        &self,
+        pack: &PackConfig<MC>,
+        project_id: Self::Id,
+    ) -> Result<Option<Self::Id>, ModLoadingError>;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -92,7 +111,7 @@ impl ModSite for CurseForge {
         Ok(ModFileInfo {
             project_info,
             filename: file.file_name,
-            url: file.download_url.expect("verified earlier").to_string(),
+            url: file.download_url.map(|u| u.to_string()),
             file_length: file.file_length as u64,
             minecraft_versions: file.game_versions,
             dependencies: file
@@ -109,6 +128,33 @@ impl ModSite for CurseForge {
                 .collect(),
             hash: CFHash { sha1, md5 },
         })
+    }
+
+    async fn get_latest_version_for_pack<MC: Sync>(
+        &self,
+        pack: &PackConfig<MC>,
+        project_id: Self::Id,
+    ) -> Result<Option<Self::Id>, ModLoadingError> {
+        let furse_mod = FURSE.get_mod(project_id).await?;
+
+        let mod_loader_type = match pack.mod_loader.id {
+            ModLoaderType::Forge => furse::structures::common_structs::ModLoaderType::Forge,
+            ModLoaderType::Neoforge => furse::structures::common_structs::ModLoaderType::NeoForge,
+            ModLoaderType::Fabric => furse::structures::common_structs::ModLoaderType::Fabric,
+            ModLoaderType::Quilt => furse::structures::common_structs::ModLoaderType::Quilt,
+        };
+
+        Ok(furse_mod
+            .latest_files_indexes
+            .iter()
+            .find(|fi| {
+                fi.game_version == pack.minecraft_version
+                    && fi
+                        .mod_loader
+                        .as_ref()
+                        .is_some_and(|ml| ml == &mod_loader_type)
+            })
+            .map(|fi| fi.file_id))
     }
 }
 
@@ -202,7 +248,7 @@ impl ModSite for Modrinth {
         Ok(ModFileInfo {
             project_info,
             filename: file_meta.filename,
-            url: file_meta.url.to_string(),
+            url: Some(file_meta.url.to_string()),
             file_length: file_meta.size as u64,
             minecraft_versions: version.game_versions,
             dependencies,
@@ -213,6 +259,30 @@ impl ModSite for Modrinth {
                     .expect("invalid sha512 hash"),
             },
         })
+    }
+
+    async fn get_latest_version_for_pack<MC: Sync>(
+        &self,
+        pack: &PackConfig<MC>,
+        project_id: Self::Id,
+    ) -> Result<Option<Self::Id>, ModLoadingError> {
+        let ferinth_mod = ferinth_with_retry(|| FERINTH.get_project(&project_id)).await?;
+        if ferinth_mod.project_type != ProjectType::Mod {
+            return Err(ModLoadingError::NotAMod);
+        }
+
+        let mod_loader = pack.mod_loader.id.to_string();
+        for v in ferinth_mod.versions {
+            let version_info = ferinth_with_retry(|| FERINTH.get_version(&v)).await?;
+            if !version_info.game_versions.contains(&pack.minecraft_version) {
+                continue;
+            }
+            if !version_info.loaders.contains(&mod_loader) {
+                continue;
+            }
+            return Ok(Some(v));
+        }
+        Ok(None)
     }
 }
 
@@ -284,7 +354,7 @@ pub type ModFileLoadingResult<K, H> = Result<ModFileInfo<K, H>, ModLoadingError>
 pub struct ModFileInfo<K, H> {
     pub project_info: ModInfo,
     pub filename: String,
-    pub url: String,
+    pub url: Option<String>,
     pub file_length: u64,
     pub minecraft_versions: Vec<String>,
     pub dependencies: Vec<ModDependency<K>>,

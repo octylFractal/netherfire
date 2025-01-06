@@ -4,6 +4,7 @@ netherfire
 A Minecraft modpack automation tool. Takes a modpack configuration and spits out a working modpack.
 
 ## Support
+
 Supported inputs are CurseForge, Modrinth, and arbitrary override directories for common, client, and server.
 
 Supported outputs are CurseForge modpacks, Modrinth modpacks, or a server directory.
@@ -23,20 +24,20 @@ following properties:
 - `modloader.id`: The ID of the modloader to use. `forge`, `neoforge`, `fabric`, or `quilt`.
 - `modloader.version`: The version of the modloader to use.
 
-Add a `mods.toml` file for the configuration of the mods in the modpack. Mods from any source may be included in any
-pack, but they may be downloaded and included as an override, increasing the size of the pack.
+Mods from any source may be included in any pack, but they may be downloaded and included as an override, increasing the
+size of the pack.
 
-There are two sections in the `mods.toml`: `mods.curseforge` and `mods.modrinth`. Each section contains a list of
-mods to include from the respective mod site. CurseForge mods use an `i32` project and version ID, while Modrinth mods
-use a `String` project and version ID. Do not use the slug for Modrinth mods, as it is subject to change and will
-introduce errors.
+There are two sections in the `config.toml` for mods: `mods.curseforge` and `mods.modrinth`. Each section contains a
+list of mods to include from the respective mod site. CurseForge mods use an `i32` project and version ID, while
+Modrinth mods use a `String` project and version ID. Do not use the slug for Modrinth mods, as it is subject to change
+and will introduce errors.
 
 Each section contains a set of mappings from an arbitrary identifier to the `project_id`, `version_id`, and requirement
 information (`client` and `server`). If a mod includes bad dependency information, you can also exclude the bad
 dependency via `ignored_dependencies`.
 
-As an example, here is a `mods.toml` for a modpack that includes the Fabric API and JEI for 1.20.1 from both CurseForge
-and Modrinth:
+As an example, here is the mods in `config.toml` for a modpack that includes the Fabric API and JEI for 1.20.1 from both
+CurseForge and Modrinth:
 
 ```toml
 [mods.curseforge]
@@ -53,11 +54,11 @@ Optionally, also add files to `overrides/`, `client-overrides/`, and `server-ove
 in the distributions directly. If you want mods not from CurseForge or Modrinth, you can also add them to a `mods/`
 directory in any of the override directories.
 
-Next, run `netherfire <source directory>`. This verifies that the configuration loads and is valid.
+Next, run `netherfire generate <source directory>`. This verifies that the configuration loads and is valid.
 
-Check `netherfire --help` and pick the distributions you want. Note that the Modrinth pack also includes the server
-mods and files for use with tools like [modrinth-install](https://github.com/nothub/mrpack-install). Each output option
-takes a directory to store the output in.
+Check `netherfire generate --help` and pick the distributions you want. Note that the Modrinth pack also includes the
+server mods and files for use with tools like [modrinth-install](https://github.com/nothub/mrpack-install). Each output
+option takes a directory to store the output in.
 
 Run the `netherfire` command again with the options you want. This will download the mods and create the
 distribution(s).

@@ -194,7 +194,7 @@ pub async fn create_modrinth_pack(
                 sha512: format!("{:x}", mod_info.hash.sha512),
             },
             env: Some(mod_.env_requirements.into()),
-            downloads: vec![mod_info.url.clone()],
+            downloads: vec![mod_info.url.clone().expect("verified earlier")],
             file_size: mod_info.file_length,
         });
     }
@@ -529,7 +529,7 @@ where
         *ZIP_OPTIONS,
     )?;
 
-    let mut content = mod_download(mod_info.url).await?;
+    let mut content = mod_download(mod_info.url.expect("verified earlier")).await?;
     tokio::task::block_in_place(|| {
         std::io::copy(&mut SyncIoBridge::new(&mut content), zip.deref_mut())
     })?;

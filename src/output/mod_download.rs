@@ -135,7 +135,7 @@ where
         }
 
         tokio::io::copy(
-            &mut mod_download(mod_info.url).await?,
+            &mut mod_download(mod_info.url.expect("verified earlier")).await?,
             &mut tokio::fs::File::create(&dest_file).await?,
         )
         .await?;

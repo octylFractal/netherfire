@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-
+use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -29,7 +29,7 @@ pub struct ConfigMod<K: ModIdValue> {
     pub ignored_deps: Vec<DependencyId<K>>,
 }
 
-#[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq, Display)]
 #[serde(rename_all = "lowercase")]
 pub enum EnvRequirement {
     /// Inherit from the state defined by the mod site or [`Required`].
