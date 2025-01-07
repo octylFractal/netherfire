@@ -275,6 +275,7 @@ impl ModSite for Modrinth {
         }
 
         let mod_loader = pack.mod_loader.id.to_string();
+        let mut version_infos = Vec::new();
         for v in ferinth_mod.versions {
             let version_info = ferinth_with_retry(|| FERINTH.get_version(&v)).await?;
             if !version_info.game_versions.contains(&pack.minecraft_version) {
@@ -283,9 +284,10 @@ impl ModSite for Modrinth {
             if !ignore_mod_loader && !version_info.loaders.contains(&mod_loader) {
                 continue;
             }
-            return Ok(Some(v));
+            version_infos.push(version_info);
         }
-        Ok(None)
+        version_infos.sort_by_key(|v| v.date_published);
+        Ok(version_infos.into_iter().last().map(|v| v.id))
     }
 }
 
