@@ -60,6 +60,7 @@ pub trait ModSite: Copy + Clone + Send + Sync + 'static {
         &self,
         pack: &PackConfig<MC>,
         project_id: Self::Id,
+        ignore_mod_loader: bool,
     ) -> Result<Option<Self::Id>, ModLoadingError>;
 }
 
@@ -134,6 +135,7 @@ impl ModSite for CurseForge {
         &self,
         pack: &PackConfig<MC>,
         project_id: Self::Id,
+        ignore_mod_loader: bool,
     ) -> Result<Option<Self::Id>, ModLoadingError> {
         let furse_mod = FURSE.get_mod(project_id).await?;
 
@@ -152,7 +154,7 @@ impl ModSite for CurseForge {
                     && fi
                         .mod_loader
                         .as_ref()
-                        .is_some_and(|ml| ml == &mod_loader_type)
+                        .is_some_and(|ml| ignore_mod_loader || ml == &mod_loader_type)
             })
             .map(|fi| fi.file_id))
     }
@@ -265,6 +267,7 @@ impl ModSite for Modrinth {
         &self,
         pack: &PackConfig<MC>,
         project_id: Self::Id,
+        ignore_mod_loader: bool,
     ) -> Result<Option<Self::Id>, ModLoadingError> {
         let ferinth_mod = ferinth_with_retry(|| FERINTH.get_project(&project_id)).await?;
         if ferinth_mod.project_type != ProjectType::Mod {
@@ -277,7 +280,7 @@ impl ModSite for Modrinth {
             if !version_info.game_versions.contains(&pack.minecraft_version) {
                 continue;
             }
-            if !version_info.loaders.contains(&mod_loader) {
+            if !ignore_mod_loader && !version_info.loaders.contains(&mod_loader) {
                 continue;
             }
             return Ok(Some(v));

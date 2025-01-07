@@ -49,6 +49,9 @@ enum NetherfireCommand {
 /// Add mods to a modpack.
 #[derive(Args)]
 struct AddMods {
+    /// Ignore mod loader compatibility checks. This is useful if using something like Connector.
+    #[clap(long)]
+    pub ignore_mod_loader: bool,
     /// Modpack source folder.
     pub source: PathBuf,
     /// Mod site to load mods from.
@@ -224,28 +227,30 @@ async fn add_mods_to_modpack(args: AddMods) -> Result<(), AddModsError> {
     let pack_config = load_pack_config(&args.source)?;
     let config_str = load_pack_config_str(&args.source)?;
     let mut editable_config = DocumentMut::from_str(&config_str).map_err(ConfigLoadError::from)?;
-    match args.mod_site {
+    match &args.mod_site {
         AddModsFrom::CurseForge(cf) => {
             add_mods_from_site(
                 CurseForge,
+                &args,
                 &pack_config,
                 &pack_config.mods.curseforge,
                 editable_config["mods"]["curseforge"]
                     .as_table_mut()
                     .ok_or_else(|| ConfigEditError::ModsNotTable("curseforge".to_string()))?,
-                cf.project_ids,
+                &cf.project_ids,
             )
             .await?;
         }
         AddModsFrom::Modrinth(mr) => {
             add_mods_from_site(
                 Modrinth,
+                &args,
                 &pack_config,
                 &pack_config.mods.modrinth,
                 editable_config["mods"]["modrinth"]
                     .as_table_mut()
                     .ok_or_else(|| ConfigEditError::ModsNotTable("modrinth".to_string()))?,
-                mr.project_ids,
+                &mr.project_ids,
             )
             .await?;
         }
@@ -267,10 +272,11 @@ async fn add_mods_to_modpack(args: AddMods) -> Result<(), AddModsError> {
 
 async fn add_mods_from_site<ID: ModIdValue>(
     site: impl ModSite<Id = ID>,
+    args: &AddMods,
     pack_config: &PackConfig<ConfigModContainer>,
     original_mods_bucket: &HashMap<String, ConfigMod<ID>>,
     mods_bucket: &mut toml_edit::Table,
-    project_ids: Vec<ID>,
+    project_ids: &[ID],
 ) -> Result<(), AddModsError> {
     let project_id_to_key_version_index: HashMap<_, _> = original_mods_bucket
         .iter()
@@ -284,13 +290,13 @@ async fn add_mods_from_site<ID: ModIdValue>(
     for project_id in project_ids {
         log::info!("Loading metadata for project ID {:?}...", project_id);
         let Some(latest_version) = site
-            .get_latest_version_for_pack(pack_config, project_id.clone())
+            .get_latest_version_for_pack(pack_config, project_id.clone(), args.ignore_mod_loader)
             .await?
         else {
             log::warn!("No valid version found for project ID {:?}", project_id);
             continue;
         };
-        if let Some((key_name, version_id)) = project_id_to_key_version_index.get(&project_id) {
+        if let Some((key_name, version_id)) = project_id_to_key_version_index.get(project_id) {
             if version_id == &latest_version {
                 log::info!(
                     "Mod {} already exists in the modpack with the same version",
@@ -345,7 +351,7 @@ async fn add_mods_from_site<ID: ModIdValue>(
             }
             log::info!("Adding mod {} to the modpack", key_name);
             let mut new_entry = toml_edit::InlineTable::new();
-            new_entry.insert("project_id", project_id.into_toml_edit_value());
+            new_entry.insert("project_id", project_id.clone().into_toml_edit_value());
             new_entry.insert("version_id", latest_version.into_toml_edit_value());
 
             fn emit_env_req(req: &EnvRequirement) -> Option<toml_edit::Value> {
