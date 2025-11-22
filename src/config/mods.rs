@@ -30,6 +30,7 @@ pub struct ConfigMod<K: ModIdValue> {
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq, Display)]
+#[display("{}", format!("{:?}", self).to_lowercase())]
 #[serde(rename_all = "lowercase")]
 pub enum EnvRequirement {
     /// Inherit from the state defined by the mod site or [`Required`].
@@ -77,7 +78,7 @@ pub enum ComputeEnvWarning {
     SiteAllowedButConfigUnsupported,
 }
 
-/// Given the env from the config and the site, compute the actual env. Never returns [`EnvRequirement::Unknown`].
+/// Given the env from the config and the site, compute the actual env.
 pub fn compute_env(
     cfg_env: EnvRequirement,
     site_env: EnvRequirement,

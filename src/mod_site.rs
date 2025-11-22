@@ -190,7 +190,7 @@ impl ModSite for Modrinth {
     type ModHash = ModrinthHash;
 
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult {
-        let ferinth_mod = ferinth_with_retry(|| FERINTH.get_project(&project_id)).await?;
+        let ferinth_mod = ferinth_with_retry(|| FERINTH.project_get(&project_id)).await?;
         if ferinth_mod.project_type != ProjectType::Mod {
             return Err(ModLoadingError::NotAMod);
         }
@@ -206,7 +206,7 @@ impl ModSite for Modrinth {
     }
 
     async fn load_metadata_by_version(&self, version_id: Self::Id) -> Option<ModLoadingResult> {
-        let version_info = match ferinth_with_retry(|| FERINTH.get_version(&version_id)).await {
+        let version_info = match ferinth_with_retry(|| FERINTH.version_get(&version_id)).await {
             Ok(v) => v,
             Err(e) => return Some(Err(e.into())),
         };
@@ -219,7 +219,7 @@ impl ModSite for Modrinth {
         id: ModId<Self::Id>,
     ) -> ModFileLoadingResult<Self::Id, Self::ModHash> {
         let project_info = self.load_metadata(id.project_id).await?;
-        let version = ferinth_with_retry(|| FERINTH.get_version(&id.version_id)).await?;
+        let version = ferinth_with_retry(|| FERINTH.version_get(&id.version_id)).await?;
         let file_meta = version
             .files
             .into_iter()
@@ -269,23 +269,26 @@ impl ModSite for Modrinth {
         project_id: Self::Id,
         ignore_mod_loader: bool,
     ) -> Result<Option<Self::Id>, ModLoadingError> {
-        let ferinth_mod = ferinth_with_retry(|| FERINTH.get_project(&project_id)).await?;
+        let ferinth_mod = ferinth_with_retry(|| FERINTH.project_get(&project_id)).await?;
         if ferinth_mod.project_type != ProjectType::Mod {
             return Err(ModLoadingError::NotAMod);
         }
 
         let mod_loader = pack.mod_loader.id.to_string();
-        let mut version_infos = Vec::new();
-        for v in ferinth_mod.versions {
-            let version_info = ferinth_with_retry(|| FERINTH.get_version(&v)).await?;
-            if !version_info.game_versions.contains(&pack.minecraft_version) {
-                continue;
-            }
-            if !ignore_mod_loader && !version_info.loaders.contains(&mod_loader) {
-                continue;
-            }
-            version_infos.push(version_info);
-        }
+        let mod_loader_filter = [mod_loader.as_str()];
+        let mod_loader_filter_opt = if ignore_mod_loader {
+            None
+        } else {
+            Some(&mod_loader_filter[..])
+        };
+        let game_version_filter = [pack.minecraft_version.as_str()];
+        let game_version_filter_opt = Some(&game_version_filter[..]);
+        let mut version_infos = ferinth_with_retry(|| FERINTH.version_list_filtered(
+            &project_id,
+            mod_loader_filter_opt,
+            game_version_filter_opt,
+            None,
+        )).await?;
         version_infos.sort_by_key(|v| v.date_published);
         Ok(version_infos.into_iter().last().map(|v| v.id))
     }
