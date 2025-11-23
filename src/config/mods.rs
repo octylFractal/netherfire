@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::fmt::Debug;
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt::Debug;
 use thiserror::Error;
 
 use crate::mod_site::{DependencyId, ModId, ModIdValue};
@@ -29,21 +29,16 @@ pub struct ConfigMod<K: ModIdValue> {
     pub ignored_deps: Vec<DependencyId<K>>,
 }
 
-#[derive(Debug, Copy, Clone, Deserialize, Eq, PartialEq, Display)]
+#[derive(Debug, Copy, Clone, Default, Deserialize, Eq, PartialEq, Display)]
 #[display("{}", format!("{:?}", self).to_lowercase())]
 #[serde(rename_all = "lowercase")]
 pub enum EnvRequirement {
     /// Inherit from the state defined by the mod site or [`Required`].
+    #[default]
     Unknown,
     Required,
     Optional,
     Unsupported,
-}
-
-impl Default for EnvRequirement {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 // Warning -- this type is explicitly compatible with the Modrinth pack format, and should not be

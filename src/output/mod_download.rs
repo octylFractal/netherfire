@@ -165,7 +165,7 @@ pub async fn mod_download(url: String) -> Result<BoxAsyncRead, ModDownloadError>
     let req = reqwest::get(url).await?.error_for_status()?;
     Ok(Box::pin(
         req.bytes_stream()
-            .map_err(|e| futures::io::Error::new(futures::io::ErrorKind::Other, e))
+            .map_err(futures::io::Error::other)
             .into_async_read()
             .compat(),
     ))

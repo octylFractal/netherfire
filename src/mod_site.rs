@@ -49,6 +49,11 @@ pub trait ModSite: Copy + Clone + Send + Sync + 'static {
 
     type ModHash: ModHash;
 
+    /// Resolve the canonical project ID for a given project ID.
+    /// Modrinth supports multiple forms, so this is necessary to make dependencies work right.
+    async fn resolve_canonical_id(&self, project_id: Self::Id)
+        -> Result<Self::Id, ModLoadingError>;
+
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult;
 
     async fn load_metadata_by_version(&self, version_id: Self::Id) -> Option<ModLoadingResult>;
@@ -75,11 +80,19 @@ impl ModSite for CurseForge {
 
     type ModHash = CFHash;
 
+    async fn resolve_canonical_id(
+        &self,
+        project_id: Self::Id,
+    ) -> Result<Self::Id, ModLoadingError> {
+        Ok(project_id)
+    }
+
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult {
         let furse_mod = FURSE.get_mod(project_id).await?;
 
         Ok(ModInfo {
             name: furse_mod.name,
+            slug: furse_mod.slug,
             distribution_allowed: furse_mod.allow_mod_distribution.unwrap_or(true),
             side_info: SideInfo {
                 client: EnvRequirement::Unknown,
@@ -189,6 +202,14 @@ impl ModSite for Modrinth {
 
     type ModHash = ModrinthHash;
 
+    async fn resolve_canonical_id(
+        &self,
+        project_id: Self::Id,
+    ) -> Result<Self::Id, ModLoadingError> {
+        let ferinth_mod = ferinth_with_retry(|| FERINTH.project_get(&project_id)).await?;
+        Ok(ferinth_mod.id)
+    }
+
     async fn load_metadata(&self, project_id: Self::Id) -> ModLoadingResult {
         let ferinth_mod = ferinth_with_retry(|| FERINTH.project_get(&project_id)).await?;
         if ferinth_mod.project_type != ProjectType::Mod {
@@ -197,6 +218,7 @@ impl ModSite for Modrinth {
 
         Ok(ModInfo {
             name: ferinth_mod.title,
+            slug: ferinth_mod.slug,
             distribution_allowed: true,
             side_info: SideInfo {
                 client: ferinth_mod.client_side.into(),
@@ -283,12 +305,15 @@ impl ModSite for Modrinth {
         };
         let game_version_filter = [pack.minecraft_version.as_str()];
         let game_version_filter_opt = Some(&game_version_filter[..]);
-        let mut version_infos = ferinth_with_retry(|| FERINTH.version_list_filtered(
-            &project_id,
-            mod_loader_filter_opt,
-            game_version_filter_opt,
-            None,
-        )).await?;
+        let mut version_infos = ferinth_with_retry(|| {
+            FERINTH.version_list_filtered(
+                &project_id,
+                mod_loader_filter_opt,
+                game_version_filter_opt,
+                None,
+            )
+        })
+        .await?;
         version_infos.sort_by_key(|v| v.date_published);
         Ok(version_infos.into_iter().last().map(|v| v.id))
     }
@@ -390,6 +415,7 @@ pub fn check_hash<D: Digest + Default>(value: &digest::Output<D>, content: &[u8]
 #[derive(Debug, Clone)]
 pub struct ModInfo {
     pub name: String,
+    pub slug: String,
     pub distribution_allowed: bool,
     pub side_info: SideInfo,
 }

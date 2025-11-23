@@ -289,6 +289,7 @@ async fn add_mods_from_site<ID: ModIdValue>(
         .collect();
     for project_id in project_ids {
         log::info!("Loading metadata for project ID {:?}...", project_id);
+        let project_id = site.resolve_canonical_id(project_id.clone()).await?;
         let Some(latest_version) = site
             .get_latest_version_for_pack(pack_config, project_id.clone(), args.ignore_mod_loader)
             .await?
@@ -296,7 +297,7 @@ async fn add_mods_from_site<ID: ModIdValue>(
             log::warn!("No valid version found for project ID {:?}", project_id);
             continue;
         };
-        if let Some((key_name, version_id)) = project_id_to_key_version_index.get(project_id) {
+        if let Some((key_name, version_id)) = project_id_to_key_version_index.get(&project_id) {
             if version_id == &latest_version {
                 log::info!(
                     "Mod {} already exists in the modpack with the same version",

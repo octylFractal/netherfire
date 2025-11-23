@@ -14,7 +14,7 @@ use crate::config::mods::{
 use crate::config::pack::PackConfig;
 use crate::mod_site::{
     CurseForge, DependencyId, ModDependencyKind, ModFileInfo, ModFileLoadingResult, ModId,
-    ModIdValue, ModLoadingError, ModSite, Modrinth,
+    ModIdValue, ModInfo, ModLoadingError, ModSite, Modrinth,
 };
 use crate::uwu_colors::{
     ErrStyle, CONFIG_VAL_STYLE, SITE_NAME_STYLE, SITE_VAL_STYLE, SUCCESS_STYLE,
@@ -253,7 +253,7 @@ where
     for dep in loaded_mod.dependencies {
         match dep.kind {
             ModDependencyKind::Required => {
-                match get_dep_name_if_missing(
+                match get_dep_meta_if_missing(
                     site,
                     dep.id.clone(),
                     mods_by_project_id,
@@ -261,7 +261,8 @@ where
                 )
                 .await
                 {
-                    Ok(Some(v)) => missing_deps.push(format!("{} ({:?})", v, dep.id)),
+                    Ok(Some(v)) => missing_deps
+                        .push(format!("{} (Slug: {}, ID: {:?})", v.name, v.slug, dep.id)),
                     Ok(None) => {}
                     Err(e) => {
                         return Err(ModVerificationError::DependencyLoading(
@@ -272,7 +273,7 @@ where
                 }
             }
             ModDependencyKind::Optional => {
-                match get_dep_name_if_missing(
+                match get_dep_meta_if_missing(
                     site,
                     dep.id.clone(),
                     mods_by_project_id,
@@ -282,11 +283,12 @@ where
                 {
                     Ok(Some(v)) => {
                         log::info!(
-                            "[{}] [{}] Missing optional dependency for {}: {} (ID: {:?})",
+                            "[{}] [{}] Missing optional dependency for {}: {} (Slug: {}, ID: {:?})",
                             S::NAME.errstyle(SITE_NAME_STYLE),
                             "FYI".errstyle(|s| s.bold().yellow()),
                             cfg_id.errstyle(CONFIG_VAL_STYLE),
-                            v.errstyle(SITE_VAL_STYLE),
+                            v.name.errstyle(SITE_VAL_STYLE),
+                            v.slug.errstyle(SITE_VAL_STYLE),
                             dep.id.errstyle(CONFIG_VAL_STYLE),
                         );
                     }
@@ -314,20 +316,31 @@ where
     Ok(())
 }
 
-async fn get_dep_name_if_missing<K, S>(
+struct DepMeta {
+    name: String,
+    slug: String,
+}
+
+async fn get_dep_meta_if_missing<K, S>(
     site: &S,
     id: DependencyId<K>,
     mods_by_project_id: &HashSet<K>,
     mods_by_version_id: &HashSet<K>,
-) -> Result<Option<String>, ModLoadingError>
+) -> Result<Option<DepMeta>, ModLoadingError>
 where
     K: ModIdValue,
     S: ModSite<Id = K>,
 {
+    let mod_to_meta = |v: ModInfo| {
+        Some(DepMeta {
+            name: v.name,
+            slug: v.slug,
+        })
+    };
     match id {
         DependencyId::Project(project_id) => {
-            if !(mods_by_project_id.contains(&project_id)) {
-                site.load_metadata(project_id).await.map(|v| Some(v.name))
+            if !mods_by_project_id.contains(&project_id) {
+                site.load_metadata(project_id).await.map(mod_to_meta)
             } else {
                 Ok(None)
             }
@@ -336,7 +349,7 @@ where
             if !mods_by_version_id.contains(&version_id) {
                 site.load_metadata_by_version(version_id).await
                     .expect("sites that provide only a version in dependencies must allow lookup by version")
-                    .map(|v| Some(v.name))
+                    .map(mod_to_meta)
             } else {
                 Ok(None)
             }
