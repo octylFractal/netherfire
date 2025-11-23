@@ -27,6 +27,10 @@ pub struct ConfigMod<K: ModIdValue> {
     /// Dependencies to ignore when validating.
     #[serde(default)]
     pub ignored_deps: Vec<DependencyId<K>>,
+    /// Dependencies to substitute for when validating.
+    /// i.e., any mods that require the listed ids will be treated as requiring this mod instead.
+    #[serde(default)]
+    pub substitute_for: Vec<DependencyId<K>>,
 }
 
 #[derive(Debug, Copy, Clone, Default, Deserialize, Eq, PartialEq, Display)]

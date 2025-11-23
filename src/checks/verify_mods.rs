@@ -142,14 +142,15 @@ where
     for (k, m) in mods.into_iter().sorted_by_key(|(k, _)| k.to_string()) {
         mods_by_project_id.insert(m.source.project_id.clone());
         mods_by_version_id.insert(m.source.version_id.clone());
-        // Include the ignored mods in the mods_by* tables to skip them.
-        for ignored_mod in m.ignored_deps.iter() {
-            match ignored_mod.clone() {
+
+        // Register any ids that are given as substitutions
+        for dep_id in &m.substitute_for {
+            match dep_id {
                 DependencyId::Project(project_id) => {
-                    mods_by_project_id.insert(project_id);
+                    mods_by_project_id.insert(project_id.clone());
                 }
                 DependencyId::Version(version_id) => {
-                    mods_by_version_id.insert(version_id);
+                    mods_by_version_id.insert(version_id.clone());
                 }
             }
         }
@@ -167,6 +168,7 @@ where
                 &mods_by_project_id,
                 &mods_by_version_id,
                 &cfg_id,
+                m.ignored_deps.iter().cloned().collect(),
                 loaded_mod.clone(),
                 &site,
             )
@@ -231,6 +233,7 @@ async fn verify_mod<K, H, S>(
     mods_by_project_id: &HashSet<K>,
     mods_by_version_id: &HashSet<K>,
     cfg_id: &str,
+    ignored_deps: HashSet<DependencyId<K>>,
     loaded_mod: ModFileInfo<K, H>,
     site: &S,
 ) -> Result<(), ModVerificationError>
@@ -251,6 +254,9 @@ where
     // Verify that all dependencies are specified.
     let mut missing_deps = Vec::new();
     for dep in loaded_mod.dependencies {
+        if ignored_deps.contains(&dep.id) {
+            continue;
+        }
         match dep.kind {
             ModDependencyKind::Required => {
                 match get_dep_meta_if_missing(
